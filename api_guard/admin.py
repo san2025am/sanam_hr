@@ -33,6 +33,24 @@ class CustomUserAdmin(BaseUserAdmin):
     inlines = (EmployeeInline,)
     list_display = ('username', 'get_full_name', 'get_role', 'is_active', 'is_staff')
     list_select_related = ('employee', 'role')
+    autocomplete_fields = ('role',) 
+    fieldsets = (
+        (None, {'fields': ('username', 'password')}),
+        ('المعلومات الشخصية', {'fields': ('first_name', 'last_name', 'email')}),
+        ('الدور', {'fields': ('role',)}),  # <-- مهم
+        ('الصلاحيات', {
+            'fields': ('is_active', 'is_staff', 'is_superuser', 'groups', 'user_permissions'),
+        }),
+        ('تواريخ مهمة', {'fields': ('last_login', 'date_joined')}),
+    )
+
+    # لصفحة الإضافة
+    add_fieldsets = (
+        (None, {
+            'classes': ('wide',),
+            'fields': ('username', 'password1', 'password2', 'role'),  # <-- مهم
+        }),
+    )
     def get_full_name(self, instance):
         if hasattr(instance, 'employee'): return instance.employee.full_name
         return "لا يوجد ملف موظف"

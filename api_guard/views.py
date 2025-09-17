@@ -9,7 +9,8 @@ from .serializers import UserRegistrationSerializer
 from .models import User
 from .models import Role
 from .serializers import RoleSerializer
-
+from rest_framework_simplejwt.views import TokenObtainPairView
+from .serializers import GuardTokenObtainPairSerializer
 # ... (الـ Views الأخرى مثل الخاصة بنفاذ)
 
 class UserProfileView(APIView):
@@ -61,3 +62,9 @@ class UserRegistrationView(generics.CreateAPIView):
     # تحديد الصلاحيات: فقط المستخدمون الذين قاموا بتسجيل الدخول
     # ويمكنك إنشاء صلاحية مخصصة (e.g., IsAdminOrHR) لمزيد من الأمان
     permission_classes = [permissions.IsAuthenticated] 
+
+# في ملف api_guard/views.py
+
+
+class GuardLoginView(TokenObtainPairView):
+    serializer_class = GuardTokenObtainPairSerializer

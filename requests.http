@@ -17,7 +17,7 @@ Content-Type: application/json
 ### 3. Create a new user (Protected Route )
 ### 3. Create a new user (Protected Route )
 # @name registerUser
-POST http://127.0.0.1:8000/api/v1/users/register/
+POST http://127.0.0.1:8000/api/auth/guard/login/
 Authorization: Bearer {{token}}
 Content-Type: application/json
 
@@ -28,7 +28,7 @@ Content-Type: application/json
     "full_name": "يوسف محمود علي",
     "national_id": "1122334488",
     "phone_number": "0544455566",
-    "role_id": 3
+    "role": "حارس امن"
 }
 
 

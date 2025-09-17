@@ -19,7 +19,7 @@ class Role(models.Model):
         verbose_name_plural = "1. الأدوار"
 
 class User(AbstractUser):
-    role = models.ForeignKey(Role, on_delete=models.SET_NULL, null=True, blank=True, verbose_name="الدور")
+    role = models.ForeignKey(Role, on_delete=models.SET_NULL, null=True, blank=True, related_name='jobs',verbose_name="الدور")
     def __str__(self): return self.username
     class Meta:
         verbose_name = "2. مستخدم"

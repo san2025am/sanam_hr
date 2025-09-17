@@ -4,6 +4,34 @@ from rest_framework import serializers
 from .models import User, Employee, Role
 from django.db import transaction # لاستخدام transaction لضمان سلامة البيانات
 
+# في ملف api_guard/serializers.py
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from rest_framework.exceptions import AuthenticationFailed
+
+GUARD_ROLE_NAMES = {"حارس أمن", "حارس الامن", "Security Guard", "Guard"}  # غطِّ الأسماء المحتملة
+
+class GuardTokenObtainPairSerializer(TokenObtainPairSerializer):
+    """
+    يصدر JWT فقط إذا كان دور المستخدم ضمن GUARD_ROLE_NAMES.
+    """
+    def validate(self, attrs):
+        data = super().validate(attrs)  # يتحقق من username/password ويعيد access/refresh
+        user = self.user
+
+        role_name = (user.role.name if getattr(user, "role", None) else "").strip()
+        if role_name.casefold() not in {n.casefold() for n in GUARD_ROLE_NAMES}:
+            raise AuthenticationFailed("الحساب ليس له دور حارس أمن، لا يمكن تسجيل الدخول من تطبيق الحارس.", code="not_guard")
+
+        # معلومات إضافية تعود للتطبيق
+        data.update({
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "role": role_name,
+            }
+        })
+        return data
+
 
 class RoleSerializer(serializers.ModelSerializer):
     class Meta:

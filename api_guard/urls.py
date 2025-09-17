@@ -5,6 +5,8 @@ from . import views # سنقوم بإنشاء هذه الـ views في الخط�
 from rest_framework.routers import DefaultRouter
 # 1. إنشاء Router
 router = DefaultRouter()
+from api_guard.views import GuardLoginView
+
 
 # 2. تسجيل الـ ViewSet مع الـ Router
 # 'roles' هو المسار الذي سيتم استخدامه في الـ URL (e.g., /api/v1/roles/)
@@ -13,6 +15,7 @@ router.register(r'roles', views.RoleViewSet, basename='role')
 urlpatterns = [
     # مثال: نقطة نهاية محمية لعرض بيانات المستخدم الحالي
     path('users/me/', views.UserProfileView.as_view(), name='user-profile'),
+    path("api/auth/guard/login/", GuardLoginView.as_view(), name="guard-login"),
     
     path('users/register/', views.UserRegistrationView.as_view(), name='user-register'),
     path('', include(router.urls)),
