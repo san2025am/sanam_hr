@@ -8,6 +8,14 @@ from django.db import transaction # لاستخدام transaction لضمان سل
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework.exceptions import AuthenticationFailed
 
+import re, secrets, hashlib
+from datetime import timedelta
+from django.utils import timezone
+from django.contrib.auth import get_user_model
+from rest_framework import serializers
+# from .models import PasswordResetSMS  # كما أنشأناه سابقاً
+from .models import Employee      # <-- عدِّل المسار حسب مكان موديل Employee لديك
+
 GUARD_ROLE_NAMES = {"حارس أمن", "حارس الامن", "Security Guard", "Guard"}  # غطِّ الأسماء المحتملة
 
 class GuardTokenObtainPairSerializer(TokenObtainPairSerializer):
@@ -31,6 +39,100 @@ class GuardTokenObtainPairSerializer(TokenObtainPairSerializer):
             }
         })
         return data
+
+
+# api_guard/serializers.py
+
+User = get_user_model()
+
+def _normalize_phone(raw: str) -> str:
+    # تبسيط: إزالة أي محارف غير أرقام، وترك + في البداية إن وُجد
+    raw = raw.strip()
+    if raw.startswith('+'):
+        return '+' + re.sub(r'\D', '', raw)
+    return re.sub(r'\D', '', raw)
+
+def _hash_code(code: str) -> str:
+    return hashlib.sha256(code.encode()).hexdigest()
+
+GUARD_ROLE_NAMES = {"حارس أمن", "حارس الامن", "security guard", "guard"}  # اختياري
+
+class PhoneForgotSerializer(serializers.Serializer):
+    phone = serializers.CharField()
+
+    # فعّل هذا الفلاغ إذا أردت السماح لحراس الأمن فقط بإعادة التعيين عبر الجوال
+    guards_only = False  # غيّرها إلى True إن أردت التقييد
+
+    def validate(self, attrs):
+        phone = _normalize_phone(attrs["phone"])
+
+        try:
+            # نبحث في Employee ثم نصل إلى user
+            emp = Employee.objects.select_related("user", "user__role").get(phone_number=phone)
+            user = emp.user
+        except Employee.DoesNotExist:
+            raise serializers.ValidationError("لا يوجد موظف مرتبط بهذا الرقم")
+
+        if not user.is_active:
+            raise serializers.ValidationError("الحساب غير مُفعل")
+
+        if self.guards_only:
+            role_name = (user.role.name if getattr(user, "role", None) else "").strip()
+            if role_name.casefold() not in {n.casefold() for n in GUARD_ROLE_NAMES}:
+                raise serializers.ValidationError("هذه الميزة متاحة لحُرّاس الأمن فقط")
+
+        # إنشاء كود 6 أرقام وصلاحيته 10 دقائق
+        code = f"{secrets.randbelow(1000000):06d}"
+        rec = PasswordResetSMS.objects.create(
+            user=user,
+            phone=phone,
+            code_hash=_hash_code(code),
+            expires_at=timezone.now() + timedelta(minutes=10),
+        )
+
+        # TODO: send_sms(phone, f"رمز الاستعادة: {code} صالح لـ 10 دقائق")
+        attrs["session_id"] = rec.id
+        # attrs["_debug_code"] = code  # للتجربة فقط، احذفه في الإنتاج
+        return attrs
+
+class PhoneResetSerializer(serializers.Serializer):
+    session_id = serializers.IntegerField()
+    code = serializers.CharField(min_length=4, max_length=6)
+    new_password = serializers.CharField(min_length=6)
+
+    def validate(self, attrs):
+        from .models import PasswordResetSMS
+        sid = attrs["session_id"]; code = attrs["code"]
+
+        try:
+            rec = PasswordResetSMS.objects.select_related("user", "user__role").get(id=sid, is_used=False)
+        except PasswordResetSMS.DoesNotExist:
+            raise serializers.ValidationError("الجلسة غير صالحة")
+
+        if rec.expires_at < timezone.now():
+            raise serializers.ValidationError("انتهت صلاحية الرمز")
+
+        if rec.attempts >= 5:
+            raise serializers.ValidationError("تجاوزت عدد المحاولات")
+
+        rec.attempts += 1
+        rec.save(update_fields=["attempts"])
+
+        if rec.code_hash != _hash_code(code):
+            raise serializers.ValidationError("رمز غير صحيح")
+
+        attrs["record"] = rec
+        return attrs
+
+    def save(self, **kwargs):
+        rec: PasswordResetSMS = self.validated_data["record"]
+        user = rec.user
+        user.set_password(self.validated_data["new_password"])
+        user.save()
+        rec.is_used = True
+        rec.save(update_fields=["is_used"])
+        return user
+
 
 
 class RoleSerializer(serializers.ModelSerializer):
