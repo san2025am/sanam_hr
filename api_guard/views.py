@@ -3,15 +3,23 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated # <-- الأهم
-from .serializers import UserProfileSerializer
 from rest_framework import generics, permissions,viewsets
-from .serializers import UserRegistrationSerializer
 from .models import User
 from .models import Role
-from .serializers import RoleSerializer
 from rest_framework_simplejwt.views import TokenObtainPairView
 from .serializers import GuardTokenObtainPairSerializer
 # ... (الـ Views الأخرى مثل الخاصة بنفاذ)
+
+from rest_framework import status
+
+from .serializers import (
+    GuardTokenObtainPairSerializer,
+    PhoneForgotSerializer,
+    PhoneResetSerializer,
+    RoleSerializer,
+    UserProfileSerializer,
+    UserRegistrationSerializer,
+)
 
 class UserProfileView(APIView):
     """
@@ -27,7 +35,6 @@ class UserProfileView(APIView):
         serializer = UserProfileSerializer(user)
         return Response(serializer.data)
 
-from .serializers import RoleSerializer
 
 # ... (باقي الـ Views) ...
 
@@ -68,3 +75,31 @@ class UserRegistrationView(generics.CreateAPIView):
 
 class GuardLoginView(TokenObtainPairView):
     serializer_class = GuardTokenObtainPairSerializer
+
+
+# api_guard/views.py
+
+
+class GuardLoginView(TokenObtainPairView):
+    serializer_class = GuardTokenObtainPairSerializer
+
+class PasswordForgotPhoneView(APIView):
+    permission_classes = []
+    authentication_classes = []
+    def post(self, request):
+        s = PhoneForgotSerializer(data=request.data)
+        # إن أردت قصرها على الحُرّاس:
+        # s.guards_only = True
+        s.is_valid(raise_exception=True)
+        return Response({"session_id": s.validated_data["session_id"],
+                         "detail": "تم إرسال رمز عبر الرسالة القصيرة"},
+                        status=status.HTTP_200_OK)
+
+class PasswordResetPhoneView(APIView):
+    permission_classes = []
+    authentication_classes = []
+    def post(self, request):
+        s = PhoneResetSerializer(data=request.data)
+        s.is_valid(raise_exception=True)
+        s.save()
+        return Response({"detail": "تم تغيير كلمة المرور"}, status=status.HTTP_200_OK)

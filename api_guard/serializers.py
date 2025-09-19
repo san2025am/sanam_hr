@@ -1,7 +1,7 @@
 # في ملف api_guard/serializers.py
 
 from rest_framework import serializers
-from .models import User, Employee, Role
+from .models import PasswordResetSMS, User, Employee, Role
 from django.db import transaction # لاستخدام transaction لضمان سلامة البيانات
 
 # في ملف api_guard/serializers.py
@@ -18,81 +18,71 @@ from .models import Employee      # <-- عدِّل المسار حسب مكان 
 
 GUARD_ROLE_NAMES = {"حارس أمن", "حارس الامن", "Security Guard", "Guard"}  # غطِّ الأسماء المحتملة
 
-class GuardTokenObtainPairSerializer(TokenObtainPairSerializer):
-    """
-    يصدر JWT فقط إذا كان دور المستخدم ضمن GUARD_ROLE_NAMES.
-    """
-    def validate(self, attrs):
-        data = super().validate(attrs)  # يتحقق من username/password ويعيد access/refresh
-        user = self.user
-
-        role_name = (user.role.name if getattr(user, "role", None) else "").strip()
-        if role_name.casefold() not in {n.casefold() for n in GUARD_ROLE_NAMES}:
-            raise AuthenticationFailed("الحساب ليس له دور حارس أمن، لا يمكن تسجيل الدخول من تطبيق الحارس.", code="not_guard")
-
-        # معلومات إضافية تعود للتطبيق
-        data.update({
-            "user": {
-                "id": user.id,
-                "username": user.username,
-                "role": role_name,
-            }
-        })
-        return data
-
-
-# api_guard/serializers.py
-
-User = get_user_model()
+get_user_model
+def _hash_code(code: str) -> str:
+    return hashlib.sha256(code.encode()).hexdigest()
 
 def _normalize_phone(raw: str) -> str:
-    # تبسيط: إزالة أي محارف غير أرقام، وترك + في البداية إن وُجد
     raw = raw.strip()
     if raw.startswith('+'):
         return '+' + re.sub(r'\D', '', raw)
     return re.sub(r'\D', '', raw)
 
-def _hash_code(code: str) -> str:
-    return hashlib.sha256(code.encode()).hexdigest()
+class GuardTokenObtainPairSerializer(TokenObtainPairSerializer):
+    """JWT فقط إذا كان الدور حارس أمن"""
+    def validate(self, attrs):
+        data = super().validate(attrs)
+        user = self.user
+        role_name = (user.role.name if getattr(user, "role", None) else "").strip()
+        if role_name.casefold() not in {n.casefold() for n in GUARD_ROLE_NAMES}:
+            raise AuthenticationFailed("الحساب ليس له دور حارس أمن، لا يمكن تسجيل الدخول من تطبيق الحارس.", code="not_guard")
+        data.update({"user": {"id": user.id, "username": user.username, "role": role_name}})
+        return data
 
-GUARD_ROLE_NAMES = {"حارس أمن", "حارس الامن", "security guard", "guard"}  # اختياري
+def _digits(s: str) -> str:
+    return re.sub(r"\D", "", s or "")
 
 class PhoneForgotSerializer(serializers.Serializer):
     phone = serializers.CharField()
-
-    # فعّل هذا الفلاغ إذا أردت السماح لحراس الأمن فقط بإعادة التعيين عبر الجوال
-    guards_only = False  # غيّرها إلى True إن أردت التقييد
+    guards_only = False
 
     def validate(self, attrs):
-        phone = _normalize_phone(attrs["phone"])
+        raw = attrs["phone"].strip()
+        want = _digits(raw)
 
-        try:
-            # نبحث في Employee ثم نصل إلى user
-            emp = Employee.objects.select_related("user", "user__role").get(phone_number=phone)
-            user = emp.user
-        except Employee.DoesNotExist:
+        # ابحث بأي صيغة، ثم طابق بالأرقام فقط
+        qs = Employee.objects.select_related("user", "user__role")\
+             .filter(phone_number__icontains=want[-7:])  # آخر 7 أرقام كبحث أولي
+        match = None
+        for emp in qs:
+            if _digits(emp.phone_number) == want:
+                match = emp
+                break
+        if not match:
+            # محاولة أخيرة: طابق أول/آخر 9-10 أرقام
+            for emp in Employee.objects.select_related("user","user__role").all():
+                if _digits(emp.phone_number).endswith(want[-9:]):
+                    match = emp
+                    break
+        if not match:
             raise serializers.ValidationError("لا يوجد موظف مرتبط بهذا الرقم")
 
+        user = match.user
         if not user.is_active:
             raise serializers.ValidationError("الحساب غير مُفعل")
 
         if self.guards_only:
-            role_name = (user.role.name if getattr(user, "role", None) else "").strip()
-            if role_name.casefold() not in {n.casefold() for n in GUARD_ROLE_NAMES}:
+            rn = (getattr(user.role, "name", "") or "").strip()
+            if rn.casefold() not in {"حارس أمن".casefold(), "حارس الامن".casefold(), "security guard", "guard"}:
                 raise serializers.ValidationError("هذه الميزة متاحة لحُرّاس الأمن فقط")
 
-        # إنشاء كود 6 أرقام وصلاحيته 10 دقائق
         code = f"{secrets.randbelow(1000000):06d}"
         rec = PasswordResetSMS.objects.create(
-            user=user,
-            phone=phone,
-            code_hash=_hash_code(code),
+            user=user, phone=raw, code_hash=_hash_code(code),
             expires_at=timezone.now() + timedelta(minutes=10),
         )
-
-        # TODO: send_sms(phone, f"رمز الاستعادة: {code} صالح لـ 10 دقائق")
+        # TODO: send_sms(raw, f"رمز الاستعادة: {code} (صالح 10 دقائق)")
         attrs["session_id"] = rec.id
-        # attrs["_debug_code"] = code  # للتجربة فقط، احذفه في الإنتاج
         return attrs
 
 class PhoneResetSerializer(serializers.Serializer):
@@ -101,11 +91,9 @@ class PhoneResetSerializer(serializers.Serializer):
     new_password = serializers.CharField(min_length=6)
 
     def validate(self, attrs):
-        from .models import PasswordResetSMS
         sid = attrs["session_id"]; code = attrs["code"]
-
         try:
-            rec = PasswordResetSMS.objects.select_related("user", "user__role").get(id=sid, is_used=False)
+            rec = PasswordResetSMS.objects.select_related("user").get(id=sid, is_used=False)
         except PasswordResetSMS.DoesNotExist:
             raise serializers.ValidationError("الجلسة غير صالحة")
 
@@ -132,8 +120,6 @@ class PhoneResetSerializer(serializers.Serializer):
         rec.is_used = True
         rec.save(update_fields=["is_used"])
         return user
-
-
 
 class RoleSerializer(serializers.ModelSerializer):
     class Meta:

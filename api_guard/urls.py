@@ -5,7 +5,7 @@ from . import views # سنقوم بإنشاء هذه الـ views في الخط�
 from rest_framework.routers import DefaultRouter
 # 1. إنشاء Router
 router = DefaultRouter()
-from api_guard.views import GuardLoginView
+from api_guard.views import GuardLoginView, PasswordForgotPhoneView, PasswordResetPhoneView
 
 
 # 2. تسجيل الـ ViewSet مع الـ Router
@@ -16,7 +16,9 @@ urlpatterns = [
     # مثال: نقطة نهاية محمية لعرض بيانات المستخدم الحالي
     path('users/me/', views.UserProfileView.as_view(), name='user-profile'),
     path("auth/guard/login/", GuardLoginView.as_view(), name="guard-login"),
-    
+     path("auth/password/forgot/phone/", PasswordForgotPhoneView.as_view(), name="password-forgot-phone"),
+    path("auth/password/reset/phone/",  PasswordResetPhoneView.as_view(),  name="password-reset-phone"),
+
     path('users/register/', views.UserRegistrationView.as_view(), name='user-register'),
     path('', include(router.urls)),
     # هنا سنضيف جميع نقاط النهاية المستقبلية الخاصة بالتطبيق

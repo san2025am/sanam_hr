@@ -469,6 +469,24 @@ class UniformDeliveryItem(BaseModel):
         verbose_name = "بند في نموذج استلام"
         verbose_name_plural = "بنود نماذج الاستلام"
 
+
+from django.contrib.auth import get_user_model
+
+User = get_user_model()
+
+class PasswordResetSMS(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="password_resets_sms")
+    phone = models.CharField(max_length=32, db_index=True)
+    code_hash = models.CharField(max_length=128)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    attempts = models.PositiveIntegerField(default=0)
+    is_used = models.BooleanField(default=False)
+
+    def __str__(self):
+        return f"{self.phone} @ {self.created_at:%Y-%m-%d %H:%M}"
+
+
 # ===================================================================
 # 8) Signals
 # ===================================================================
@@ -488,3 +506,4 @@ def apply_salary_deduction_for_uniform(sender, instance, created, **kwargs):
         salary.deductions = F('deductions') + instance.total_value
         salary.save()
         print(f"تمت إضافة خصم بقيمة {instance.total_value} إلى راتب الموظف {instance.employee.full_name}")
+

@@ -1,34 +1,24 @@
-### 1. Login as Admin to get the token
-# @name loginAdmin
-POST http://127.0.0.1:8000/api/v1/auth/login/
-Content-Type: application/json
+@base = http://127.0.0.1:8000
+@prefix = api/v1
+@json = application/json
+
+### Guard login
+POST {{base}}/{{prefix}}/auth/guard/login/
+Content-Type: {{json}}
 
 {
-    "username": "admin",
-    "password": "admin2025"
-}
-### 2. Get all roles (Protected Route )
-
-@token = {{loginAdmin.response.body.access}}
-GET http://127.0.0.1:8000/api/v1/roles/
-Authorization: Bearer {{token}}
-Content-Type: application/json
-
-### 3. Create a new user (Protected Route )
-### 3. Create a new user (Protected Route )
-# @name registerUser
-POST http://127.0.0.1:8000/api/auth/guard/login/
-Authorization: Bearer {{token}}
-Content-Type: application/json
-
-{
-    "username": "newguard034",
-    "email": "newguard04@example.com",
-    "password": "a-secure-password-789",
-    "full_name": "يوسف محمود علي",
-    "national_id": "1122334488",
-    "phone_number": "0544455566",
-    "role": "حارس امن"
+  "username": "asma",
+  "password": "as@12345678"
 }
 
+### Forgot by phone
+POST {{base}}/{{prefix}}/auth/password/forgot/phone/
+Content-Type: {{json}}
 
+{ "phone": "+966558672670" }
+
+### Reset by phone
+POST {{base}}/{{prefix}}/auth/password/reset/phone/
+Content-Type: {{json}}
+
+{ "session_id": 1, "code": "123456", "new_password": "NewPass123" }
