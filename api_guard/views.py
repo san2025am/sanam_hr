@@ -9,8 +9,10 @@ from .models import Role
 from rest_framework_simplejwt.views import TokenObtainPairView
 from .serializers import GuardTokenObtainPairSerializer
 # ... (الـ Views الأخرى مثل الخاصة بنفاذ)
-
 from rest_framework import status
+
+
+from .serializers import PhoneForgotSerializer, PhoneResetSerializer
 
 from .serializers import (
     GuardTokenObtainPairSerializer,
@@ -77,27 +79,19 @@ class GuardLoginView(TokenObtainPairView):
     serializer_class = GuardTokenObtainPairSerializer
 
 
-# api_guard/views.py
-
-
-class GuardLoginView(TokenObtainPairView):
-    serializer_class = GuardTokenObtainPairSerializer
 
 class PasswordForgotPhoneView(APIView):
-    permission_classes = []
-    authentication_classes = []
+    permission_classes = []; authentication_classes = []
     def post(self, request):
         s = PhoneForgotSerializer(data=request.data)
-        # إن أردت قصرها على الحُرّاس:
-        # s.guards_only = True
         s.is_valid(raise_exception=True)
-        return Response({"session_id": s.validated_data["session_id"],
-                         "detail": "تم إرسال رمز عبر الرسالة القصيرة"},
-                        status=status.HTTP_200_OK)
+        return Response({
+            "session_id": s.validated_data["session_id"],
+            "detail": "تم إرسال الرمز إلى بريدك الإلكتروني"
+        }, status=status.HTTP_200_OK)
 
 class PasswordResetPhoneView(APIView):
-    permission_classes = []
-    authentication_classes = []
+    permission_classes = []; authentication_classes = []
     def post(self, request):
         s = PhoneResetSerializer(data=request.data)
         s.is_valid(raise_exception=True)

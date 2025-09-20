@@ -8,17 +8,17 @@ Content-Type: {{json}}
 
 {
   "username": "asma",
-  "password": "as@12345678"
+  "password": "As@123456"
 }
 
 ### Forgot by phone
 POST {{base}}/{{prefix}}/auth/password/forgot/phone/
 Content-Type: {{json}}
 
-{ "phone": "+966558672670" }
+{ "phone": "+967712714307" }
 
 ### Reset by phone
 POST {{base}}/{{prefix}}/auth/password/reset/phone/
 Content-Type: {{json}}
 
-{ "session_id": 1, "code": "123456", "new_password": "NewPass123" }
+{ "session_id": 17, "code": "486028", "new_password": "As@123456" }

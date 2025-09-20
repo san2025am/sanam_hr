@@ -8,25 +8,33 @@ from django.db import transaction # لاستخدام transaction لضمان سل
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework.exceptions import AuthenticationFailed
 
+from django.conf import settings
+
+from .emailer import send_email_otp
+
 import re, secrets, hashlib
 from datetime import timedelta
 from django.utils import timezone
 from django.contrib.auth import get_user_model
-from rest_framework import serializers
 # from .models import PasswordResetSMS  # كما أنشأناه سابقاً
 from .models import Employee      # <-- عدِّل المسار حسب مكان موديل Employee لديك
 
+
+
+User = get_user_model()
+
+def _digits(s: str) -> str:
+    import re as _re
+    return _re.sub(r"\D", "", s or "")
+
+def _hash_code(code: str) -> str:
+    import hashlib as _h
+    return _h.sha256(code.encode()).hexdigest()
+
+
 GUARD_ROLE_NAMES = {"حارس أمن", "حارس الامن", "Security Guard", "Guard"}  # غطِّ الأسماء المحتملة
 
-get_user_model
-def _hash_code(code: str) -> str:
-    return hashlib.sha256(code.encode()).hexdigest()
 
-def _normalize_phone(raw: str) -> str:
-    raw = raw.strip()
-    if raw.startswith('+'):
-        return '+' + re.sub(r'\D', '', raw)
-    return re.sub(r'\D', '', raw)
 
 class GuardTokenObtainPairSerializer(TokenObtainPairSerializer):
     """JWT فقط إذا كان الدور حارس أمن"""
@@ -42,50 +50,61 @@ class GuardTokenObtainPairSerializer(TokenObtainPairSerializer):
 def _digits(s: str) -> str:
     return re.sub(r"\D", "", s or "")
 
+
+
 class PhoneForgotSerializer(serializers.Serializer):
+    """يستقبل الهاتف → يعثر على المستخدم → يرسل كود إلى user.email"""
     phone = serializers.CharField()
-    guards_only = False
 
     def validate(self, attrs):
         raw = attrs["phone"].strip()
         want = _digits(raw)
 
-        # ابحث بأي صيغة، ثم طابق بالأرقام فقط
-        qs = Employee.objects.select_related("user", "user__role")\
-             .filter(phone_number__icontains=want[-7:])  # آخر 7 أرقام كبحث أولي
         match = None
+        qs = Employee.objects.select_related("user", "user__role").filter(phone_number__icontains=want[-7:])
         for emp in qs:
             if _digits(emp.phone_number) == want:
-                match = emp
-                break
+                match = emp; break
         if not match:
-            # محاولة أخيرة: طابق أول/آخر 9-10 أرقام
-            for emp in Employee.objects.select_related("user","user__role").all():
+            for emp in Employee.objects.select_related("user", "user__role").all():
                 if _digits(emp.phone_number).endswith(want[-9:]):
-                    match = emp
-                    break
+                    match = emp; break
         if not match:
             raise serializers.ValidationError("لا يوجد موظف مرتبط بهذا الرقم")
 
         user = match.user
         if not user.is_active:
             raise serializers.ValidationError("الحساب غير مُفعل")
+        if not (user.email and user.email.strip()):
+            raise serializers.ValidationError("لا يوجد بريد إلكتروني مرتبط بهذا الحساب")
 
-        if self.guards_only:
-            rn = (getattr(user.role, "name", "") or "").strip()
-            if rn.casefold() not in {"حارس أمن".casefold(), "حارس الامن".casefold(), "security guard", "guard"}:
-                raise serializers.ValidationError("هذه الميزة متاحة لحُرّاس الأمن فقط")
-
-        code = f"{secrets.randbelow(1000000):06d}"
+        # إنشاء الجلسة والكود
+        code = f"{secrets.randbelow(1_000_000):06d}"
         rec = PasswordResetSMS.objects.create(
             user=user, phone=raw, code_hash=_hash_code(code),
-            expires_at=timezone.now() + timedelta(minutes=10),
+            expires_at=timezone.now() + timedelta(minutes=10)
         )
-        # TODO: send_sms(raw, f"رمز الاستعادة: {code} (صالح 10 دقائق)")
+
+        # إرسال عبر الإيميل
+        subject = "رمز استعادة كلمة المرور - سنام الأمن"
+        body = f"رمز استعادة كلمة المرور الخاص بك هو: {code}\nصالح لمدة 10 دقائق.\n"
+        try:
+            send_email_otp(user.email, subject, body)
+        except Exception as e:
+            # في التطوير يمكن إظهار الكود
+            if getattr(settings, "DEBUG_SMS_ECHO", False):
+                attrs["session_id"] = rec.id
+                attrs["_debug_code"] = code
+                attrs["_send_error"] = str(e)
+                return attrs
+            raise serializers.ValidationError("تعذر إرسال البريد الإلكتروني، حاول لاحقًا")
+
         attrs["session_id"] = rec.id
         return attrs
 
+
 class PhoneResetSerializer(serializers.Serializer):
+    """التحقق من الكود وتغيير كلمة المرور"""
     session_id = serializers.IntegerField()
     code = serializers.CharField(min_length=4, max_length=6)
     new_password = serializers.CharField(min_length=6)
@@ -97,9 +116,8 @@ class PhoneResetSerializer(serializers.Serializer):
         except PasswordResetSMS.DoesNotExist:
             raise serializers.ValidationError("الجلسة غير صالحة")
 
-        if rec.expires_at < timezone.now():
+        if rec.expires_at and rec.expires_at < timezone.now():
             raise serializers.ValidationError("انتهت صلاحية الرمز")
-
         if rec.attempts >= 5:
             raise serializers.ValidationError("تجاوزت عدد المحاولات")
 
@@ -120,6 +138,7 @@ class PhoneResetSerializer(serializers.Serializer):
         rec.is_used = True
         rec.save(update_fields=["is_used"])
         return user
+
 
 class RoleSerializer(serializers.ModelSerializer):
     class Meta:
