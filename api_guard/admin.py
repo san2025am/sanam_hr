@@ -15,6 +15,8 @@ from .models import (
 # Inlines
 # =========================
 
+
+
 class EmployeeInline(admin.StackedInline):
     model = Employee
     can_delete = False
@@ -95,8 +97,8 @@ class RoleAdmin(admin.ModelAdmin):
 
 @admin.register(Employee)
 class EmployeeAdmin(admin.ModelAdmin):
-    list_display = ('full_name', 'national_id', 'phone_number', 'bank_name', 'supervisor')
-    search_fields = ('full_name', 'national_id', 'phone_number', 'bank_account')
+    list_display = ('id','full_name', 'national_id', 'phone_number', 'bank_name', 'supervisor')
+    search_fields = ('id','full_name', 'national_id', 'phone_number', 'bank_account')
     list_filter = ('bank_name', 'supervisor')
     autocomplete_fields = ('supervisor',)
 

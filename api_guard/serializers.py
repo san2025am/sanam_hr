@@ -1,7 +1,6 @@
 # في ملف api_guard/serializers.py
 
 from rest_framework import serializers
-from .models import PasswordResetSMS, User, Employee, Role
 from django.db import transaction # لاستخدام transaction لضمان سلامة البيانات
 
 # في ملف api_guard/serializers.py
@@ -17,15 +16,14 @@ from datetime import timedelta
 from django.utils import timezone
 from django.contrib.auth import get_user_model
 # from .models import PasswordResetSMS  # كما أنشأناه سابقاً
-from .models import Employee      # <-- عدِّل المسار حسب مكان موديل Employee لديك
-
-
+from .models import (
+    Role, User, Employee, Location, EmployeeLocationAssignment, Task, Shift,
+    AttendanceRecord, Salary, Report, ReportAttachment, Request,
+    ViolationRule, EmployeeViolation, Contract, Advance, Custody,
+    UniformItem, UniformDelivery, UniformDeliveryItem,PasswordResetSMS
+)
 
 User = get_user_model()
-
-def _digits(s: str) -> str:
-    import re as _re
-    return _re.sub(r"\D", "", s or "")
 
 def _hash_code(code: str) -> str:
     import hashlib as _h
@@ -50,29 +48,18 @@ class GuardTokenObtainPairSerializer(TokenObtainPairSerializer):
 def _digits(s: str) -> str:
     return re.sub(r"\D", "", s or "")
 
-
-
-class PhoneForgotSerializer(serializers.Serializer):
-    """يستقبل الهاتف → يعثر على المستخدم → يرسل كود إلى user.email"""
-    phone = serializers.CharField()
+class UsernameForgotSerializer(serializers.Serializer):
+    """يستقبل اسم المستخدم → يعثر على الحساب → يرسل كود إلى user.email"""
+    username = serializers.CharField()
 
     def validate(self, attrs):
-        raw = attrs["phone"].strip()
-        want = _digits(raw)
+        uname = attrs["username"].strip()
 
-        match = None
-        qs = Employee.objects.select_related("user", "user__role").filter(phone_number__icontains=want[-7:])
-        for emp in qs:
-            if _digits(emp.phone_number) == want:
-                match = emp; break
-        if not match:
-            for emp in Employee.objects.select_related("user", "user__role").all():
-                if _digits(emp.phone_number).endswith(want[-9:]):
-                    match = emp; break
-        if not match:
-            raise serializers.ValidationError("لا يوجد موظف مرتبط بهذا الرقم")
+        try:
+            user = User.objects.select_related("role").get(username__iexact=uname)
+        except User.DoesNotExist:
+            raise serializers.ValidationError("لا يوجد مستخدم بهذا الاسم")
 
-        user = match.user
         if not user.is_active:
             raise serializers.ValidationError("الحساب غير مُفعل")
         if not (user.email and user.email.strip()):
@@ -80,18 +67,26 @@ class PhoneForgotSerializer(serializers.Serializer):
 
         # إنشاء الجلسة والكود
         code = f"{secrets.randbelow(1_000_000):06d}"
+
+        # لو كان موديل PasswordResetSMS يشترط phone غير فارغ، خزّن رقم الموظف إن وُجد أو سلسلة فارغة.
+        phone_val = getattr(getattr(user, "employee", None), "phone_number", "") or ""
+
         rec = PasswordResetSMS.objects.create(
-            user=user, phone=raw, code_hash=_hash_code(code),
-            expires_at=timezone.now() + timedelta(minutes=10)
+            user=user,
+            phone=phone_val,
+            code_hash=_hash_code(code),
+            expires_at=timezone.now() + timedelta(minutes=10),
         )
 
         # إرسال عبر الإيميل
         subject = "رمز استعادة كلمة المرور - سنام الأمن"
         body = f"رمز استعادة كلمة المرور الخاص بك هو: {code}\nصالح لمدة 10 دقائق.\n"
+
+        from django.conf import settings
         try:
+            from .emailer import send_email_otp
             send_email_otp(user.email, subject, body)
         except Exception as e:
-            # في التطوير يمكن إظهار الكود
             if getattr(settings, "DEBUG_SMS_ECHO", False):
                 attrs["session_id"] = rec.id
                 attrs["_debug_code"] = code
@@ -103,7 +98,7 @@ class PhoneForgotSerializer(serializers.Serializer):
         return attrs
 
 
-class PhoneResetSerializer(serializers.Serializer):
+class UsernameResetSerializer(serializers.Serializer):
     """التحقق من الكود وتغيير كلمة المرور"""
     session_id = serializers.IntegerField()
     code = serializers.CharField(min_length=4, max_length=6)
@@ -139,86 +134,40 @@ class PhoneResetSerializer(serializers.Serializer):
         rec.save(update_fields=["is_used"])
         return user
 
+# api_guard/serializers.py (أضِف هذا)
 
-class RoleSerializer(serializers.ModelSerializer):
+
+class LocationMiniSerializer(serializers.ModelSerializer):
     class Meta:
-        model = Role
-        fields = ['name']
+        model = Location
+        fields = ["id", "name", "client_name"]
 
-class EmployeeSerializer(serializers.ModelSerializer):
+# ابقِه كما هو
+class SalaryMiniSerializer(serializers.ModelSerializer):
+    total_salary = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     class Meta:
-        model = Employee
-        fields = ['full_name', 'national_id', 'phone_number']
+        model = Salary
+        fields = ["base_salary", "bonuses", "overtime", "deductions", "total_salary", "pay_date"]
 
-class UserProfileSerializer(serializers.ModelSerializer):
-    # نستخدم Serializers متداخلة لعرض بيانات من جداول أخرى
-    employee = EmployeeSerializer(read_only=True)
-    role = RoleSerializer(read_only=True)
+# عدّل هنا: احذف source من salary وأضف allow_null لتحمل عدم وجود سجل راتب
+class EmployeeMeSerializer(serializers.ModelSerializer):
+    username   = serializers.CharField(source="user.username", read_only=True)
+    email      = serializers.EmailField(source="user.email", read_only=True)
+    role       = serializers.CharField(source="user.role.name", read_only=True)
+    role_label = serializers.SerializerMethodField()
+    locations  = LocationMiniSerializer(many=True, read_only=True)
 
-    class Meta:
-        model = User
-        fields = ['id', 'username', 'email', 'role', 'employee']
-
-
-class RoleSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Role
-        # سنعرض جميع الحقول المتاحة في الموديل
-        fields = ['id', 'name', 'description'] 
-        
-class UserRegistrationSerializer(serializers.ModelSerializer):
-    """
-    Serializer لإنشاء مستخدم جديد مع ملف الموظف الخاص به.
-    """
-    # حقل لكلمة المرور (للكتابة فقط، لا يتم عرضه عند قراءة البيانات)
-    password = serializers.CharField(write_only=True, required=True, style={'input_type': 'password'})
-    
-    # حقول الموظف التي نريد إدخالها عند التسجيل
-    full_name = serializers.CharField(write_only=True, required=True)
-    national_id = serializers.CharField(write_only=True, required=True)
-    phone_number = serializers.CharField(write_only=True, required=True)
-    
-    # حقل لتحديد دور المستخدم الجديد
-    role_id = serializers.IntegerField(write_only=True, required=True)
+    # كان: salary = SalaryMiniSerializer(source="salary", read_only=True)
+    salary     = SalaryMiniSerializer(read_only=True, allow_null=True)
 
     class Meta:
-        model = User
-        # الحقول التي سيتم استقبالها في الطلب
-        fields = ('username', 'email', 'password', 'full_name', 'national_id', 'phone_number', 'role_id')
+        model  = Employee
+        fields = [
+            "id", "username", "email", "role", "role_label",
+            "full_name", "national_id", "phone_number",
+            "hire_date", "bank_name", "bank_account",
+            "locations", "salary",
+        ]
 
-    def create(self, validated_data):
-        """
-        تجاوز دالة create الافتراضية للتعامل مع إنشاء User و Employee معًا.
-        """
-        # نستخدم transaction.atomic لضمان أنه إما أن تنجح العمليتان معًا أو تفشلان معًا
-        with transaction.atomic():
-            # استخراج بيانات الموظف والدور
-            full_name = validated_data.pop('full_name')
-            national_id = validated_data.pop('national_id')
-            phone_number = validated_data.pop('phone_number')
-            role_id = validated_data.pop('role_id')
-            
-            # الحصول على كائن الدور (Role)
-            try:
-                role = Role.objects.get(id=role_id)
-            except Role.DoesNotExist:
-                raise serializers.ValidationError({'role_id': 'الدور المحدد غير موجود.'})
-
-            # إنشاء المستخدم (User)
-            # نستخدم create_user لضمان تشفير كلمة المرور بشكل صحيح
-            user = User.objects.create_user(
-                username=validated_data['username'],
-                email=validated_data['email'],
-                password=validated_data['password'],
-                role=role
-            )
-
-            # إنشاء الموظف (Employee) وربطه بالمستخدم
-            Employee.objects.create(
-                user=user,
-                full_name=full_name,
-                national_id=national_id,
-                phone_number=phone_number
-            )
-            
-            return user
+    def get_role_label(self, obj):
+        return obj.user.role.__str__() if getattr(obj.user, "role", None) else None

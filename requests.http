@@ -8,17 +8,21 @@ Content-Type: {{json}}
 
 {
   "username": "asma",
-  "password": "As@123456"
+  "password": "Asmg36@2022"
 }
 
 ### Forgot by phone
-POST {{base}}/{{prefix}}/auth/password/forgot/phone/
+POST {{base}}/{{prefix}}/auth/password/forgot/username/
 Content-Type: {{json}}
 
-{ "phone": "+967712714307" }
+{ "username": "asma" }
 
 ### Reset by phone
-POST {{base}}/{{prefix}}/auth/password/reset/phone/
+POST {{base}}/{{prefix}}/auth/password/reset/username/
 Content-Type: {{json}}
 
 { "session_id": 17, "code": "486028", "new_password": "As@123456" }
+
+GET http://127.0.0.1:8000/api/v1/auth/guard/3/profile/?include=locations,attendance,tasks,reports,requests,violations,uniforms,salary&limit=10&days=60
+Authorization: Bearer <ACCESS_TOKEN>
+

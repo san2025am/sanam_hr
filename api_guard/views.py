@@ -2,77 +2,30 @@
 
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import IsAuthenticated # <-- الأهم
-from rest_framework import generics, permissions,viewsets
-from .models import User
-from .models import Role
+
 from rest_framework_simplejwt.views import TokenObtainPairView
-from .serializers import GuardTokenObtainPairSerializer
 # ... (الـ Views الأخرى مثل الخاصة بنفاذ)
-from rest_framework import status
 
 
-from .serializers import PhoneForgotSerializer, PhoneResetSerializer
 
 from .serializers import (
     GuardTokenObtainPairSerializer,
-    PhoneForgotSerializer,
-    PhoneResetSerializer,
-    RoleSerializer,
-    UserProfileSerializer,
-    UserRegistrationSerializer,
+    UsernameForgotSerializer,
+    UsernameResetSerializer,
+    EmployeeMeSerializer
+ 
 )
 
-class UserProfileView(APIView):
-    """
-    نقطة نهاية محمية.
-    لا يمكن الوصول إليها إلا إذا كان المستخدم قد سجل دخوله
-    وأرسل Token صالحًا.
-    """
-    permission_classes = [IsAuthenticated] # تحديد الصلاحيات المطلوبة
-
-    def get(self, request, *args, **kwargs):
-        # request.user سيكون متاحًا بفضل JWTAuthentication
-        user = request.user
-        serializer = UserProfileSerializer(user)
-        return Response(serializer.data)
+from rest_framework import permissions, status
+from django.shortcuts import get_object_or_404
 
 
-# ... (باقي الـ Views) ...
 
-class RoleViewSet(viewsets.ModelViewSet):
-    """
-    API endpoint that allows roles to be viewed or edited.
-    يوفر هذا الـ ViewSet جميع العمليات:
-    - GET (list):   لعرض قائمة بجميع الأدوار.
-    - GET (retrieve): لعرض دور واحد محدد بالـ ID.
-    - POST (create): لإنشاء دور جديد.
-    - PUT (update): لتحديث دور موجود بالكامل.
-    - PATCH (partial_update): لتحديث جزء من دور موجود.
-    - DELETE (destroy): لحذف دور موجود.
-    """
-    queryset = Role.objects.all()
-    serializer_class = RoleSerializer
-    
-    # تحديد الصلاحيات: فقط المدير العام (Admin) يمكنه إدارة الأدوار
-    # IsAdminUser هي صلاحية مدمجة في Django تتأكد من أن request.user.is_staff == True
-    permission_classes = [permissions.IsAdminUser]
+from django.contrib.auth import authenticate
+from rest_framework.permissions import AllowAny
+from rest_framework_simplejwt.tokens import RefreshToken
 
-
-# ... (باقي الـ imports والـ Views) ...
-
-class UserRegistrationView(generics.CreateAPIView):
-    """
-    نقطة نهاية لإنشاء مستخدم جديد (موظف).
-    """
-    queryset = User.objects.all()
-    serializer_class = UserRegistrationSerializer
-    
-    # تحديد الصلاحيات: فقط المستخدمون الذين قاموا بتسجيل الدخول
-    # ويمكنك إنشاء صلاحية مخصصة (e.g., IsAdminOrHR) لمزيد من الأمان
-    permission_classes = [permissions.IsAuthenticated] 
-
-# في ملف api_guard/views.py
+from .models import Employee,Salary
 
 
 class GuardLoginView(TokenObtainPairView):
@@ -80,20 +33,77 @@ class GuardLoginView(TokenObtainPairView):
 
 
 
-class PasswordForgotPhoneView(APIView):
+class PasswordForgotUsernameView(APIView):
     permission_classes = []; authentication_classes = []
     def post(self, request):
-        s = PhoneForgotSerializer(data=request.data)
+        s = UsernameForgotSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         return Response({
             "session_id": s.validated_data["session_id"],
             "detail": "تم إرسال الرمز إلى بريدك الإلكتروني"
         }, status=status.HTTP_200_OK)
 
-class PasswordResetPhoneView(APIView):
+class PasswordResetUsernameView(APIView):
     permission_classes = []; authentication_classes = []
     def post(self, request):
-        s = PhoneResetSerializer(data=request.data)
+        s = UsernameResetSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         s.save()
         return Response({"detail": "تم تغيير كلمة المرور"}, status=status.HTTP_200_OK)
+    
+
+
+class GuardLoginAndProfileView(APIView):
+    """
+    POST /api/v1/auth/guard/login/
+    body: { "username": "...", "password": "..." }
+    returns: { access, refresh, user: {...}, employee: {...} }
+    (مسموح فقط لمن دوره guard)
+    """
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        username = (request.data.get("username") or "").strip()
+        password = request.data.get("password") or ""
+        if not username or not password:
+            return Response({"detail": "اسم المستخدم/كلمة المرور مطلوبة"}, status=400)
+
+        user = authenticate(request, username=username, password=password)
+        if not user:
+            return Response({"detail": "بيانات دخول غير صحيحة"}, status=401)
+
+        if not user.is_active:
+            return Response({"detail": "الحساب غير مُفعل"}, status=403)
+
+        role_name = getattr(getattr(user, "role", None), "name", None)
+        if role_name != "guard":
+            return Response({"detail": "الدخول متاح لحُراس الأمن فقط"}, status=403)
+
+        # جهّز بيانات الموظف
+        try:
+            employee = Employee.objects.select_related(
+                "user", "user__role", "salary"
+            ).prefetch_related("locations").get(user=user)
+            Salary.objects.get_or_create(employee=employee) 
+
+        except Employee.DoesNotExist:
+            return Response({"detail": "لا يوجد ملف موظف مرتبط بهذا المستخدم"}, status=404)
+
+        emp_data = EmployeeMeSerializer(employee).data
+
+        # أنشئ توكنات JWT
+        refresh = RefreshToken.for_user(user)
+        access = refresh.access_token
+
+        return Response({
+            "access": str(access),
+            "refresh": str(refresh),
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "role": role_name,
+                "role_label": str(user.role) if getattr(user, "role", None) else None,
+            },
+            "employee": emp_data
+        }, status=200)
