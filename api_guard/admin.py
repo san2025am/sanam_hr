@@ -10,6 +10,11 @@ from .models import (
     Contract, Advance, Custody, LogisticRequest,
     UniformItem, UniformDelivery, UniformDeliveryItem
 )
+from django import forms
+from django.contrib import admin, messages
+from django.core.exceptions import ValidationError
+from django.db import IntegrityError
+
 
 # =========================
 # Inlines
@@ -97,8 +102,8 @@ class RoleAdmin(admin.ModelAdmin):
 
 @admin.register(Employee)
 class EmployeeAdmin(admin.ModelAdmin):
-    list_display = ('id','full_name', 'national_id', 'phone_number', 'bank_name', 'supervisor')
-    search_fields = ('id','full_name', 'national_id', 'phone_number', 'bank_account')
+    list_display = ('full_name', 'national_id', 'phone_number', 'bank_name', 'supervisor')
+    search_fields = ('full_name', 'national_id', 'phone_number', 'bank_account')
     list_filter = ('bank_name', 'supervisor')
     autocomplete_fields = ('supervisor',)
 
@@ -242,5 +247,28 @@ class UniformDeliveryAdmin(admin.ModelAdmin):
     autocomplete_fields = ('employee', 'location',
                            'operations_manager_signature', 'operations_assistant_signature')
 
-# Many-to-Many through model
-admin.site.register(EmployeeLocationAssignment)
+class EmployeeLocationAssignmentForm(forms.ModelForm):
+    class Meta:
+        model  = EmployeeLocationAssignment
+        fields = "__all__"
+
+    def clean(self):
+        cleaned = super().clean()
+        emp = cleaned.get("employee")
+        loc = cleaned.get("location")
+
+        if emp and loc:
+            qs = EmployeeLocationAssignment.objects.filter(employee=emp, location=loc)
+            # عند التعديل، استبعد السجل الحالي
+            if self.instance and self.instance.pk:
+                qs = qs.exclude(pk=self.instance.pk)
+            if qs.exists():
+                # منع التكرار برسالة واضحة بدل IntegrityError
+                raise ValidationError("هذا الموظف مرتبط بهذا الموقع بالفعل.")
+        return cleaned
+
+
+@admin.register(EmployeeLocationAssignment)
+class EmployeeLocationAssignmentAdmin(admin.ModelAdmin):
+    form = EmployeeLocationAssignmentForm
+    # مافيه حاجة نعمل 

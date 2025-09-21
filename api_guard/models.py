@@ -140,10 +140,20 @@ class Location(BaseModel):
 class EmployeeLocationAssignment(BaseModel):
     employee = models.ForeignKey(Employee, on_delete=models.CASCADE, verbose_name="الموظف")
     location = models.ForeignKey(Location, on_delete=models.CASCADE, verbose_name="الموقع")
+    start_date = models.DateField(null=True, blank=True)
+    end_date   = models.DateField(null=True, blank=True)
 
+    
     def __str__(self): return f"{self.employee.full_name} @ {self.location.name}"
 
     class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["employee", "location"],
+                condition=models.Q(end_date__isnull=True),   # يمنع أكثر من تعيين نشط
+                name="uniq_active_employee_location",
+            )
+        ]
         unique_together = ('employee', 'location')
         verbose_name = "تعيين موظف لموقع"
         verbose_name_plural = "تعيينات الموظفين للمواقع"

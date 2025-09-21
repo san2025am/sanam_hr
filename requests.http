@@ -11,7 +11,10 @@ Content-Type: {{json}}
   "password": "Asmg36@2022"
 }
 
-### Forgot by phone
+
+
+
+### Guard prof
 POST {{base}}/{{prefix}}/auth/password/forgot/username/
 Content-Type: {{json}}
 

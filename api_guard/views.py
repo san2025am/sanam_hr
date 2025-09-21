@@ -9,12 +9,20 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 
 
 from .serializers import (
+    GUARD_ROLE_NAMES,
     GuardTokenObtainPairSerializer,
     UsernameForgotSerializer,
     UsernameResetSerializer,
     EmployeeMeSerializer
  
 )
+from rest_framework.permissions import IsAuthenticated
+
+from rest_framework.permissions import IsAuthenticated
+
+from django.contrib.auth import get_user_model
+User = get_user_model()
+
 
 from rest_framework import permissions, status
 from django.shortcuts import get_object_or_404
@@ -107,3 +115,41 @@ class GuardLoginAndProfileView(APIView):
             },
             "employee": emp_data
         }, status=200)
+
+# أضف هذا الاستيراد أعلى الملف
+
+# عدّل المسار حسب مكان موديل Employee لديك
+
+class GuardMeView(APIView):
+    """
+    يعيد بيانات الموظف الحارس الحالي (حسب التوكن).
+    يدعم POST (ويمكن دعم GET أيضًا إن رغبت).
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        u = request.user
+        role = getattr(getattr(u, "role", None), "name", "") or ""
+        if role.strip().casefold() not in {n.casefold() for n in GUARD_ROLE_NAMES}:
+            return Response({"detail": "غير مصرح"}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            emp = Employee.objects.select_related("user", "user__role").get(user=u)
+        except Employee.DoesNotExist:
+            return Response({"detail": "لا يوجد ملف موظف"}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response(EmployeeMeSerializer(emp).data, status=status.HTTP_200_OK)
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        u = request.user
+        role_name = (getattr(getattr(u, "role", None), "name", "") or "").strip().casefold()
+        if role_name not in {n.casefold() for n in GUARD_ROLE_NAMES}:
+            return Response({"detail": "غير مصرح"}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            emp = Employee.objects.select_related("user", "user__role").get(user=u)
+        except Employee.DoesNotExist:
+            return Response({"detail": "لا يوجد ملف موظف"}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response(EmployeeMeSerializer(emp).data, status=status.HTTP_200_OK)

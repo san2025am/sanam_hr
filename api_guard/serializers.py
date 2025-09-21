@@ -1,38 +1,26 @@
-# في ملف api_guard/serializers.py
-
 from rest_framework import serializers
-from django.db import transaction # لاستخدام transaction لضمان سلامة البيانات
-
-# في ملف api_guard/serializers.py
-from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from rest_framework.exceptions import AuthenticationFailed
-
-from django.conf import settings
-
-from .emailer import send_email_otp
-
-import re, secrets, hashlib
-from datetime import timedelta
 from django.utils import timezone
 from django.contrib.auth import get_user_model
-# from .models import PasswordResetSMS  # كما أنشأناه سابقاً
+from datetime import timedelta
+import re, secrets
+
 from .models import (
     Role, User, Employee, Location, EmployeeLocationAssignment, Task, Shift,
     AttendanceRecord, Salary, Report, ReportAttachment, Request,
     ViolationRule, EmployeeViolation, Contract, Advance, Custody,
-    UniformItem, UniformDelivery, UniformDeliveryItem,PasswordResetSMS
+    UniformItem, UniformDelivery, UniformDeliveryItem, PasswordResetSMS
 )
+
 
 User = get_user_model()
 
-def _hash_code(code: str) -> str:
-    import hashlib as _h
-    return _h.sha256(code.encode()).hexdigest()
+# =========================
+# Auth / Guard login
+# =========================
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from rest_framework.exceptions import AuthenticationFailed
 
-
-GUARD_ROLE_NAMES = {"حارس أمن", "حارس الامن", "Security Guard", "Guard"}  # غطِّ الأسماء المحتملة
-
-
+GUARD_ROLE_NAMES = {"حارس أمن", "حارس الامن", "Security Guard", "Guard"}
 
 class GuardTokenObtainPairSerializer(TokenObtainPairSerializer):
     """JWT فقط إذا كان الدور حارس أمن"""
@@ -45,6 +33,14 @@ class GuardTokenObtainPairSerializer(TokenObtainPairSerializer):
         data.update({"user": {"id": user.id, "username": user.username, "role": role_name}})
         return data
 
+# =========================
+# Forgot / Reset via Username + Email
+# =========================
+
+def _hash_code(code: str) -> str:
+    import hashlib as _h
+    return _h.sha256(code.encode()).hexdigest()
+
 def _digits(s: str) -> str:
     return re.sub(r"\D", "", s or "")
 
@@ -54,7 +50,6 @@ class UsernameForgotSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         uname = attrs["username"].strip()
-
         try:
             user = User.objects.select_related("role").get(username__iexact=uname)
         except User.DoesNotExist:
@@ -65,12 +60,8 @@ class UsernameForgotSerializer(serializers.Serializer):
         if not (user.email and user.email.strip()):
             raise serializers.ValidationError("لا يوجد بريد إلكتروني مرتبط بهذا الحساب")
 
-        # إنشاء الجلسة والكود
         code = f"{secrets.randbelow(1_000_000):06d}"
-
-        # لو كان موديل PasswordResetSMS يشترط phone غير فارغ، خزّن رقم الموظف إن وُجد أو سلسلة فارغة.
         phone_val = getattr(getattr(user, "employee", None), "phone_number", "") or ""
-
         rec = PasswordResetSMS.objects.create(
             user=user,
             phone=phone_val,
@@ -81,22 +72,20 @@ class UsernameForgotSerializer(serializers.Serializer):
         # إرسال عبر الإيميل
         subject = "رمز استعادة كلمة المرور - سنام الأمن"
         body = f"رمز استعادة كلمة المرور الخاص بك هو: {code}\nصالح لمدة 10 دقائق.\n"
-
-        from django.conf import settings
         try:
             from .emailer import send_email_otp
             send_email_otp(user.email, subject, body)
-        except Exception as e:
+        except Exception:
+            # في وضع التطوير قد ترغب في إعادة الكود
+            from django.conf import settings
             if getattr(settings, "DEBUG_SMS_ECHO", False):
                 attrs["session_id"] = rec.id
                 attrs["_debug_code"] = code
-                attrs["_send_error"] = str(e)
                 return attrs
             raise serializers.ValidationError("تعذر إرسال البريد الإلكتروني، حاول لاحقًا")
 
         attrs["session_id"] = rec.id
         return attrs
-
 
 class UsernameResetSerializer(serializers.Serializer):
     """التحقق من الكود وتغيير كلمة المرور"""
@@ -134,31 +123,53 @@ class UsernameResetSerializer(serializers.Serializer):
         rec.save(update_fields=["is_used"])
         return user
 
-# api_guard/serializers.py (أضِف هذا)
+# =========================
+# EmployeeMe payload (للجوال)
+# =========================
+
 
 
 class LocationMiniSerializer(serializers.ModelSerializer):
+    instructions = serializers.CharField(source="instructions", allow_null=True, required=False)
+
     class Meta:
         model = Location
-        fields = ["id", "name", "client_name"]
+        fields = ["id", "name", "client_name","instructions"]
 
-# ابقِه كما هو
 class SalaryMiniSerializer(serializers.ModelSerializer):
-    total_salary = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    # تحويل الأرقام إلى نصوص لتفادي أخطاء النوع في Flutter
+    base_salary  = serializers.SerializerMethodField()
+    bonuses      = serializers.SerializerMethodField()
+    overtime     = serializers.SerializerMethodField()
+    deductions   = serializers.SerializerMethodField()
+    total_salary = serializers.SerializerMethodField()
+
     class Meta:
-        model = Salary
+        model  = Salary
         fields = ["base_salary", "bonuses", "overtime", "deductions", "total_salary", "pay_date"]
 
-# عدّل هنا: احذف source من salary وأضف allow_null لتحمل عدم وجود سجل راتب
+    def _as_str(self, v): return None if v is None else str(v)
+    def get_base_salary (self, o): return self._as_str(getattr(o, "base_salary",  None))
+    def get_bonuses     (self, o): return self._as_str(getattr(o, "bonuses",      None))
+    def get_overtime    (self, o): return self._as_str(getattr(o, "overtime",     None))
+    def get_deductions  (self, o): return self._as_str(getattr(o, "deductions",   None))
+    def get_total_salary(self, o): return self._as_str(getattr(o, "total_salary", None))
+
 class EmployeeMeSerializer(serializers.ModelSerializer):
     username   = serializers.CharField(source="user.username", read_only=True)
-    email      = serializers.EmailField(source="user.email", read_only=True)
-    role       = serializers.CharField(source="user.role.name", read_only=True)
+    email      = serializers.EmailField(source="user.email",   read_only=True, allow_null=True)
+    role       = serializers.CharField(source="user.role.name", read_only=True, allow_null=True)
     role_label = serializers.SerializerMethodField()
-    locations  = LocationMiniSerializer(many=True, read_only=True)
+    locations  = serializers.SerializerMethodField()
+    salary     = serializers.SerializerMethodField()
 
-    # كان: salary = SalaryMiniSerializer(source="salary", read_only=True)
-    salary     = SalaryMiniSerializer(read_only=True, allow_null=True)
+    # الحقول الجديدة
+    id_expiry_date         = serializers.DateField(read_only=True, allow_null=True)
+    date_of_birth_gregorian = serializers.DateField(read_only=True, allow_null=True)
+    employee_instructions   = serializers.CharField(read_only=True, allow_blank=True, allow_null=True)
+    location_instructions   = serializers.SerializerMethodField()
+    supervisor_name         = serializers.SerializerMethodField()
+    supervisor_phone        = serializers.SerializerMethodField()
 
     class Meta:
         model  = Employee
@@ -166,8 +177,46 @@ class EmployeeMeSerializer(serializers.ModelSerializer):
             "id", "username", "email", "role", "role_label",
             "full_name", "national_id", "phone_number",
             "hire_date", "bank_name", "bank_account",
+            "id_expiry_date", "date_of_birth_gregorian",   # ✅ أضفنا الحقول الجديدة
+            "employee_instructions", "location_instructions",
+            "supervisor_name", "supervisor_phone",
             "locations", "salary",
         ]
 
     def get_role_label(self, obj):
-        return obj.user.role.__str__() if getattr(obj.user, "role", None) else None
+        return str(getattr(obj.user, "role", "")) or None
+
+    def get_locations(self, obj):
+        qs = (EmployeeLocationAssignment.objects
+              .select_related("location")
+              .filter(employee=obj))
+        out = []
+        for a in qs:
+            if a.location:
+                out.append({
+                    "id": a.location.id,
+                    "name": a.location.name,
+                    "client_name": getattr(a.location, "client_name", "") or "",
+                    "instructions": getattr(a.location, "instructions", "") or "",
+                })
+        return out
+
+    def get_salary(self, obj):
+        last = (Salary.objects
+                .filter(employee=obj)
+                .order_by("-pay_date", "-id")
+                .first())
+        return SalaryMiniSerializer(last).data if last else {
+            "base_salary": None, "bonuses": None, "overtime": None,
+            "deductions": None, "total_salary": None, "pay_date": None
+        }
+
+    def get_location_instructions(self, obj):
+        qs = EmployeeLocationAssignment.objects.filter(employee=obj).select_related("location")
+        return [getattr(a.location, "instructions", "") or "" for a in qs if a.location]
+
+    def get_supervisor_name(self, obj):
+        return getattr(obj.supervisor, "full_name", None) if obj.supervisor else None
+
+    def get_supervisor_phone(self, obj):
+        return getattr(obj.supervisor, "phone_number", None) if obj.supervisor else None
