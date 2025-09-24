@@ -4,8 +4,10 @@ from django.contrib.auth import get_user_model
 from datetime import timedelta
 import re, secrets
 
+from .utils.geo import haversine_m, point_in_polygon
+
 from .models import (
-    Role, User, Employee, Location, EmployeeLocationAssignment, Task, Shift,
+    EmployeeShiftAssignment, Role, User, Employee, Location, EmployeeLocationAssignment, Task, Shift,
     AttendanceRecord, Salary, Report, ReportAttachment, Request,
     ViolationRule, EmployeeViolation, Contract, Advance, Custody,
     UniformItem, UniformDelivery, UniformDeliveryItem, PasswordResetSMS
@@ -127,7 +129,33 @@ class UsernameResetSerializer(serializers.Serializer):
 # EmployeeMe payload (للجوال)
 # =========================
 
+class TaskMiniSerializer(serializers.ModelSerializer):
+    location_name = serializers.CharField(source="location.name", read_only=True)
 
+    class Meta:
+        model = Task
+        fields = ["id", "title", "description", "status", "due_date", "location_name"]
+
+
+# --- Shift assignment (mini) ---
+class ShiftAssignmentMiniSerializer(serializers.ModelSerializer):
+    shift_name    = serializers.CharField(source="shift.name", read_only=True)
+    location_name = serializers.CharField(source="location.name", read_only=True)
+
+    # نريد وقت البداية/النهاية الفعلي:
+    start_time = serializers.SerializerMethodField()
+    end_time   = serializers.SerializerMethodField()
+
+    class Meta:
+        model = EmployeeShiftAssignment
+        fields = ["id", "date", "shift_name", "location_name", "start_time", "end_time", "active", "notes"]
+
+    def get_start_time(self, obj):
+        # لو معيّن وقت مخصص في الإسناد استخدمه، وإلا وقت الوردية
+        return (obj.start_time or getattr(obj.shift, "start_time", None))
+
+    def get_end_time(self, obj):
+        return (obj.end_time or getattr(obj.shift, "end_time", None))
 
 class LocationMiniSerializer(serializers.ModelSerializer):
     instructions = serializers.CharField(source="instructions", allow_null=True, required=False)
@@ -166,10 +194,13 @@ class EmployeeMeSerializer(serializers.ModelSerializer):
     # الحقول الجديدة
     id_expiry_date         = serializers.DateField(read_only=True, allow_null=True)
     date_of_birth_gregorian = serializers.DateField(read_only=True, allow_null=True)
-    employee_instructions   = serializers.CharField(read_only=True, allow_blank=True, allow_null=True)
+    employee_instructions   = serializers.CharField( source="instructions", read_only=True, allow_blank=True, allow_null=True)
     location_instructions   = serializers.SerializerMethodField()
     supervisor_name         = serializers.SerializerMethodField()
     supervisor_phone        = serializers.SerializerMethodField()
+
+    tasks  = serializers.SerializerMethodField()
+    shifts = serializers.SerializerMethodField()
 
     class Meta:
         model  = Employee
@@ -181,6 +212,7 @@ class EmployeeMeSerializer(serializers.ModelSerializer):
             "employee_instructions", "location_instructions",
             "supervisor_name", "supervisor_phone",
             "locations", "salary",
+            "tasks", "shifts",
         ]
 
     def get_role_label(self, obj):
@@ -220,3 +252,186 @@ class EmployeeMeSerializer(serializers.ModelSerializer):
 
     def get_supervisor_phone(self, obj):
         return getattr(obj.supervisor, "phone_number", None) if obj.supervisor else None
+    
+    # ======= الجديد: المهام =======
+    def get_tasks(self, obj):
+        # إن كنت ما زلت تستخدم Task.assigned_to (حسب وصفك)
+        tasks_qs = (Task.objects
+                    .filter(assigned_to=obj)
+                    .select_related("location")
+                    .order_by("-due_date", "-id"))
+        return TaskMiniSerializer(tasks_qs, many=True).data
+
+        # ملاحظة: لو لاحقًا تحوّلت إلى جدول إسناد مهام Many-to-Many،
+        # غيّر أعلاه إلى:
+        # tasks_qs = (EmployeeTaskAssignment.objects
+        #             .filter(employee=obj)
+        #             .select_related("task", "task__location")
+        #             .order_by("-task__due_date", "-task__id"))
+        # return TaskMiniSerializer([a.task for a in tasks_qs], many=True).data
+
+    # ======= الجديد: الورديات =======
+    def get_shifts(self, obj):
+        qs = (
+            EmployeeShiftAssignment.objects
+            .filter(employee=obj)                           # كل الورديات (نشطة/غير نشطة)
+            .select_related("shift", "location")
+            .order_by("-date", "-id")                      # الأحدث أولًا
+        )
+
+        out = []
+        for a in qs:
+            sh = a.shift
+            # لو الإسناد عنده وقت مخصص خذه، وإلا خذ وقت الوردية الأصلية:
+            start = getattr(a, "start_time", None) or (getattr(sh, "start_time", None) if sh else None)
+            end   = getattr(a, "end_time",   None) or (getattr(sh, "end_time",   None) if sh else None)
+
+            out.append({
+                "id": a.id,
+                "date": a.date.isoformat() if a.date else None,
+                "shift_name": getattr(sh, "name", "") or "",
+                "location_name": getattr(a.location, "name", "") or "",
+                "start_time": start.strftime("%H:%M") if start else None,
+                "end_time":   end.strftime("%H:%M")   if end   else None,
+                # حقّل الاسم بغض النظر عن تسمية الحقل في الموديل
+                "active": bool(getattr(a, "is_active", getattr(a, "active", True))),
+                "notes": a.notes or "",
+            })
+        return out
+
+
+
+
+class AttendanceCheckSerializer(serializers.Serializer):
+    location_id = serializers.IntegerField()
+    action = serializers.ChoiceField(choices=[("check_in", "check_in"), ("check_out", "check_out")])
+    lat = serializers.FloatField()
+    lng = serializers.FloatField()
+    accuracy = serializers.FloatField(required=False, min_value=0, default=9999)
+
+    def validate(self, attrs):
+        request = self.context["request"]
+        user = request.user
+        try:
+            employee = Employee.objects.get(user=user)
+        except Employee.DoesNotExist:
+            raise serializers.ValidationError("لا يوجد ملف موظف مرتبط بهذا الحساب.")
+
+        try:
+            location = Location.objects.get(id=attrs["location_id"])
+        except Location.DoesNotExist:
+            raise serializers.ValidationError("الموقع غير موجود.")
+
+        lat, lng = attrs["lat"], attrs["lng"]
+        acc = attrs.get("accuracy", 9999.0)
+
+        # سياسة الدقة: الدقة يجب ألا تتجاوز نصف قطر الموقع
+        if location.gps_radius and acc > float(location.gps_radius):
+            raise serializers.ValidationError("دقة الموقع ضعيفة. الرجاء المحاولة مرة أخرى بالقرب من الموقع.")
+
+        # فحص المضلّع أولاً إن مُفعّل
+        inside_polygon = None
+        if location.use_polygon and location.polygon_coords and len(location.polygon_coords) >= 3:
+            try:
+                polygon = [(float(p[0]), float(p[1])) for p in location.polygon_coords]
+                inside_polygon = point_in_polygon((lat, lng), polygon)
+            except Exception:
+                raise serializers.ValidationError("تنسيق المضلّع غير صالح في إعدادات الموقع.")
+
+            if not inside_polygon:
+                raise serializers.ValidationError("النقطة خارج حدود الموقع المحددة (Polygon).")
+
+        # إن لم يُستخدم المضلّع: فحص نصف القطر
+        if not (location.use_polygon and inside_polygon):
+            if not location.gps_coordinates:
+                raise serializers.ValidationError("إحداثيات الموقع غير مُعرّفة. راجع لوحة الإدارة.")
+            try:
+                loc_lat, loc_lng = [float(x.strip()) for x in location.gps_coordinates.split(",", 1)]
+            except Exception:
+                raise serializers.ValidationError("تنسيق إحداثيات الموقع غير صحيح في لوحة الإدارة.")
+            dist = haversine_m(lat, lng, loc_lat, loc_lng)
+            attrs["distance_m"] = dist
+            if dist > float(location.gps_radius):
+                raise serializers.ValidationError(f"خارج النطاق المسموح ({location.gps_radius}م). المسافة: {round(dist)}م.")
+
+        attrs["employee"] = employee
+        attrs["location_obj"] = location
+        return attrs
+
+    def create(self, validated):
+        # إنشاء/تحديث سجل حضور بحسب action
+        employee = validated["employee"]
+        location = validated["location_obj"]
+        action = validated["action"]
+        lat = validated["lat"]; lng = validated["lng"]
+        acc = validated.get("accuracy", None)
+        dist = validated.get("distance_m", None)
+
+        if action == "check_in":
+            rec = AttendanceRecord.objects.create(
+                employee=employee,
+                location=location,
+                check_in_time=timezone.now(),
+                notes=f"lat={lat}, lng={lng}, acc={acc}, dist={dist}"
+            )
+            return rec, "تم تسجيل الحضور بنجاح."
+        else:
+            # check_out: آخر سجل مفتوح لنفس الموظف
+            rec = (AttendanceRecord.objects
+                   .filter(employee=employee, check_out_time__isnull=True)
+                   .order_by("-check_in_time")
+                   .first())
+            if not rec:
+                raise serializers.ValidationError("لا يوجد سجل حضور مفتوح لإقفاله.")
+            rec.check_out_time = timezone.now()
+            note_suffix = f" | out lat={lat}, lng={lng}, acc={acc}, dist={dist}"
+            rec.notes = (rec.notes or "") + note_suffix
+            rec.save(update_fields=["check_out_time", "notes"])
+            return rec, "تم تسجيل الانصراف بنجاح."
+
+
+
+
+class ResolveLocationSerializer(serializers.Serializer):
+    lat = serializers.FloatField()
+    lng = serializers.FloatField()
+    accuracy = serializers.FloatField(required=False, min_value=0, default=9999)
+
+    def validate(self, attrs):
+        request = self.context["request"]
+        user = request.user
+        try:
+            employee = Employee.objects.get(user=user)
+        except Employee.DoesNotExist:
+            raise serializers.ValidationError("لا يوجد ملف موظف مرتبط بهذا الحساب.")
+        attrs["employee"] = employee
+        return attrs
+
+    def find_best_location(self, employee, lat, lng):
+        # المواقع المكلّف بها الموظف فقط
+        qs = Location.objects.filter(assigned_employees=employee)
+
+        best = None  # (loc, distance_m, reason)
+        for loc in qs:
+            # Polygon أولًا
+            inside_poly = False
+            if getattr(loc, "use_polygon", False) and loc.polygon_coords:
+                poly = [(float(p[0]), float(p[1])) for p in loc.polygon_coords]
+                inside_poly = point_in_polygon((lat, lng), poly)
+                if inside_poly:
+                    return loc, 0.0, "polygon"  # داخل الحدود
+
+            # وإلا دائرة نصف قطر
+            if loc.gps_coordinates:
+                try:
+                    la, ln = [float(x.strip()) for x in loc.gps_coordinates.split(",", 1)]
+                except Exception:
+                    continue
+                dist = haversine_m(lat, lng, la, ln)
+                if dist <= float(loc.gps_radius):
+                    # خذ الأقرب
+                    if (best is None) or (dist < best[1]):
+                        best = (loc, dist, "radius")
+
+        return best  # قد يكون None
+

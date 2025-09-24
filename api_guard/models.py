@@ -123,6 +123,12 @@ class Location(BaseModel):
     gps_coordinates = models.CharField(max_length=100, blank=True, null=True, verbose_name="إحداثيات الموقع")
     gps_radius = models.PositiveIntegerField(default=50, verbose_name="نطاق GPS المسموح به (متر)")
 
+
+    use_polygon = models.BooleanField(default=False, verbose_name="استخدام مضلّع بدل الدائرة")
+    polygon_coords = models.JSONField(
+        blank=True, null=True,
+        help_text="قائمة نقاط [[lat,lng],[lat,lng],...]", verbose_name="إحداثيات المضلّع"
+    )
     # تعليمات الموقع
     instructions = models.TextField(blank=True, null=True, verbose_name="تعليمات الموقع")
 
@@ -191,6 +197,40 @@ class Shift(BaseModel):
     class Meta:
         verbose_name = "6. وردية"
         verbose_name_plural = "6. الورديات"
+
+class EmployeeShiftAssignment(BaseModel):
+    """
+    يربط موظف بوردية معينة (يمكن أن تتكرر يومياً/أسبوعياً).
+    """
+    employee   = models.ForeignKey(
+        Employee, on_delete=models.CASCADE,
+        related_name='shift_assignments', verbose_name="الموظف"
+    )
+    shift      = models.ForeignKey(
+        Shift, on_delete=models.PROTECT,
+        related_name='employee_assignments', verbose_name="الوردية"
+    )
+    date       = models.DateField(null=True, blank=True, verbose_name="التاريخ")  
+    start_time = models.TimeField(null=True, blank=True, verbose_name="وقت بدء مخصص")
+    end_time   = models.TimeField(null=True, blank=True, verbose_name="وقت انتهاء مخصص")
+    location   = models.ForeignKey(
+        Location, on_delete=models.SET_NULL,
+        null=True, blank=True,
+        related_name='shift_assignments', verbose_name="الموقع"
+    )
+    active     = models.BooleanField(default=True, verbose_name="نشِطة؟")
+    notes      = models.TextField(null=True, blank=True, verbose_name="ملاحظات")
+
+    def __str__(self):
+        d = self.date.isoformat() if self.date else "دائم"
+        return f"{self.employee.full_name} ← {self.shift.name} ({d})"
+
+    class Meta:
+        verbose_name = "تعيين وردية لموظف"
+        verbose_name_plural = "تعيينات الورديات للموظفين"
+        unique_together = ('employee', 'shift', 'date', 'start_time', 'end_time')
+
+
 
 # ===================================================================
 # 3) الحضور والرواتب

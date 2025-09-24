@@ -7,10 +7,11 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 # ... (الـ Views الأخرى مثل الخاصة بنفاذ)
 
 
-
 from .serializers import (
     GUARD_ROLE_NAMES,
+  AttendanceCheckSerializer,
     GuardTokenObtainPairSerializer,
+    ResolveLocationSerializer,
     UsernameForgotSerializer,
     UsernameResetSerializer,
     EmployeeMeSerializer
@@ -18,9 +19,10 @@ from .serializers import (
 )
 from rest_framework.permissions import IsAuthenticated
 
-from rest_framework.permissions import IsAuthenticated
 
 from django.contrib.auth import get_user_model
+
+from api_guard import serializers
 User = get_user_model()
 
 
@@ -153,3 +155,62 @@ class GuardMeView(APIView):
             return Response({"detail": "لا يوجد ملف موظف"}, status=status.HTTP_404_NOT_FOUND)
 
         return Response(EmployeeMeSerializer(emp).data, status=status.HTTP_200_OK)
+    
+
+    
+    
+
+class AttendanceCheckAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        ser = AttendanceCheckSerializer(data=request.data, context={"request": request})
+        if ser.is_valid():
+            try:
+                rec, msg = ser.save()  # تُعيد (record, message)
+            except serializers.ValidationError as e:
+                return Response({"detail": e.detail if hasattr(e, "detail") else str(e)},
+                                status=status.HTTP_400_BAD_REQUEST)
+            return Response({
+                "detail": msg,
+                "record_id": str(rec.id),
+                "employee": rec.employee.full_name,
+                "location": rec.location.name if rec.location else None,
+                "check_in_time": rec.check_in_time,
+                "check_out_time": rec.check_out_time,
+            }, status=status.HTTP_200_OK)
+        return Response({"detail": ser.errors if ser.errors else "بيانات غير صالحة"}, status=400)
+
+
+
+
+class ResolveLocationAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        ser = ResolveLocationSerializer(data=request.data, context={"request": request})
+        if not ser.is_valid():
+            return Response({"detail": ser.errors}, status=400)
+
+        employee = ser.validated_data["employee"]
+        lat = ser.validated_data["lat"]
+        lng = ser.validated_data["lng"]
+        acc = ser.validated_data.get("accuracy", None)
+
+        found = ser.find_best_location(employee, lat, lng)
+        if not found:
+            return Response({"detail": "لا يوجد موقع مكلَّف به ضمن النطاق."}, status=404)
+
+        loc, dist, mode = found
+        # استرجع lat/lng/radius الموحدة
+        la, ln = [float(x.strip()) for x in loc.gps_coordinates.split(",", 1)] if loc.gps_coordinates else (None, None)
+        data = {
+            "location_id": loc.id,
+            "name": loc.name,
+            "client_name": loc.client_name,
+            "lat": la, "lng": ln,
+            "radius": float(loc.gps_radius),
+            "distance": round(dist, 2),
+            "mode": mode,  # "polygon" أو "radius"
+        }
+        return Response({"detail": "تم تحديد الموقع", **data}, status=200)

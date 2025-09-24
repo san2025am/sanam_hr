@@ -5,7 +5,7 @@ from . import views # سنقوم بإنشاء هذه الـ views في الخط�
 from rest_framework.routers import DefaultRouter
 # 1. إنشاء Router
 router = DefaultRouter()
-from api_guard.views import  GuardLoginAndProfileView, GuardMeView, PasswordForgotUsernameView, PasswordResetUsernameView
+from api_guard.views import  AttendanceCheckAPIView,GuardLoginAndProfileView, GuardMeView, PasswordForgotUsernameView, PasswordResetUsernameView, ResolveLocationAPIView
 
 
 # 2. تسجيل الـ ViewSet مع الـ Router
@@ -18,10 +18,7 @@ urlpatterns = [
     path("auth/password/forgot/username/", PasswordForgotUsernameView.as_view(), name="password-forgot-Username"),
     path("auth/password/reset/username/",  PasswordResetUsernameView.as_view(),  name="password-reset-Username"),
   
+    path("attendance/check/", AttendanceCheckAPIView.as_view(), name="attendance-check"),
 
-
-    # هنا سنضيف جميع نقاط النهاية المستقبلية الخاصة بالتطبيق
-    # مثل:
-    # path('tasks/', views.TaskListCreateView.as_view(), name='task-list'),
-    # path('tasks/<int:pk>/', views.TaskDetailView.as_view(), name='task-detail'),
+  path("attendance/resolve-location/", ResolveLocationAPIView.as_view(), name="resolve-location"),
 ]
