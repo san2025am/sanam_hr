@@ -303,7 +303,7 @@ class EmployeeMeSerializer(serializers.ModelSerializer):
 
 
 class AttendanceCheckSerializer(serializers.Serializer):
-    location_id = serializers.IntegerField()
+    location_id = serializers.UUIDField()
     action = serializers.ChoiceField(choices=[("check_in", "check_in"), ("check_out", "check_out")])
     lat = serializers.FloatField()
     lng = serializers.FloatField()
@@ -358,36 +358,19 @@ class AttendanceCheckSerializer(serializers.Serializer):
         attrs["location_obj"] = location
         return attrs
 
+   
     def create(self, validated):
-        # إنشاء/تحديث سجل حضور بحسب action
-        employee = validated["employee"]
-        location = validated["location_obj"]
-        action = validated["action"]
-        lat = validated["lat"]; lng = validated["lng"]
-        acc = validated.get("accuracy", None)
-        dist = validated.get("distance_m", None)
-
-        if action == "check_in":
-            rec = AttendanceRecord.objects.create(
-                employee=employee,
-                location=location,
+    # لن نستعملها في هذا السيناريو لأننا أنجزنا الإنشاء في الـ View.
+    # لو أردت إبقاءها: أرجع instance فقط.
+        from .models import AttendanceRecord
+        if validated["action"] == "check_in":
+            return AttendanceRecord.objects.create(
+                employee=validated["employee"],
+                location=validated["location_obj"],
                 check_in_time=timezone.now(),
-                notes=f"lat={lat}, lng={lng}, acc={acc}, dist={dist}"
+                notes=f"in lat={validated['lat']}, lng={validated['lng']}, acc={validated.get('accuracy')}, dist={validated.get('distance_m')}"
             )
-            return rec, "تم تسجيل الحضور بنجاح."
-        else:
-            # check_out: آخر سجل مفتوح لنفس الموظف
-            rec = (AttendanceRecord.objects
-                   .filter(employee=employee, check_out_time__isnull=True)
-                   .order_by("-check_in_time")
-                   .first())
-            if not rec:
-                raise serializers.ValidationError("لا يوجد سجل حضور مفتوح لإقفاله.")
-            rec.check_out_time = timezone.now()
-            note_suffix = f" | out lat={lat}, lng={lng}, acc={acc}, dist={dist}"
-            rec.notes = (rec.notes or "") + note_suffix
-            rec.save(update_fields=["check_out_time", "notes"])
-            return rec, "تم تسجيل الانصراف بنجاح."
+    # للـ check_out ننجزها في الـ View لأنها تحتاج البحث عن آخر سجل مفتوح.
 
 
 
