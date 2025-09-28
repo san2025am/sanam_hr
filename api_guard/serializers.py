@@ -246,6 +246,7 @@ class EmployeeMeSerializer(serializers.ModelSerializer):
             "supervisor_name", "supervisor_phone",
             "locations", "salary",
             "tasks", "shifts",
+            'shift_assignments',
         ]
 
     def get_role_label(self, obj):
@@ -399,7 +400,27 @@ class AttendanceCheckSerializer(serializers.Serializer):
         inside = (start_dt - grace) <= now_local <= (end_dt + grace)
         return inside, start_dt, end_dt
 
-    
+   
+
+    @staticmethod
+    def _anchor_times(now_local, start_t, end_t, anchor_date=None):
+        """
+        يُرجع (start_dt, end_dt) لوردية تُرتكز على anchor_date (إن وجد)،
+        ويدعم الوردية الليلية (end_t <= start_t).
+        """
+        if anchor_date is None:
+            base = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+        else:
+            base = now_local.replace(
+                year=anchor_date.year, month=anchor_date.month, day=anchor_date.day,
+                hour=0, minute=0, second=0, microsecond=0
+            )
+        start_dt = base.replace(hour=start_t.hour, minute=start_t.minute)
+        end_dt   = base.replace(hour=end_t.hour,   minute=end_t.minute)
+        if end_t <= start_t:
+            end_dt += timedelta(days=1)
+        return start_dt, end_dt
+
     # ====== Validation ======
     def validate(self, attrs):
         request = self.context["request"]
@@ -464,18 +485,19 @@ class AttendanceCheckSerializer(serializers.Serializer):
                 raise serializers.ValidationError(f"خارج النطاق المسموح ({radius}م). المسافة: {round(dist)}م.")
 
         # ===== حساب الوردية الحالية =====
-        # ===== حساب الوردية الحالية =====
+        # ===== حساب الوردية ا
         now_aware = dj_timezone.now()
         now_local = dj_timezone.localtime(now_aware)
         action = (attrs.get("action") or "").strip().lower()
 
         current_shift = None
-        shift_start_dt = shift_end_dt = None
+        allowed_start = allowed_end = None  # سنملؤهما للعرض في الرد
 
         if HAS_ASSIGN:
             assign_qs = (EmployeeShiftAssignment.objects
                         .select_related("shift", "location")
-                        .filter(employee=employee, active=True))
+                        .filter(employee=employee, active=True)
+                        .order_by('-date', '-start_time', '-end_time'))
 
             for a in assign_qs:
                 sh = getattr(a, "shift", None)
@@ -487,52 +509,68 @@ class AttendanceCheckSerializer(serializers.Serializer):
                 if not (start_t and end_t):
                     continue
 
-                # ===== السماحات =====
-                if (a.checkin_grace is None and
+                # غير مقيّدة لو الثلاثة None
+                unrestricted = (
+                    a.checkin_grace is None and
                     a.checkout_grace is None and
-                    a.checkout_grace_hours is None):
-                    # كل الحقول فارغة ⇒ السماح لأي وقت
-                    ok, sdt, edt = True, None, None
+                    a.checkout_grace_hours is None
+                )
+
+                anchor = getattr(a, "date", None) or None
+                start_dt, end_dt = self._anchor_times(now_local, start_t, end_t, anchor_date=anchor)
+
+                ok = False
+                win_l = win_r = None
+
+                if unrestricted:
+                    ok = True
+                    win_l = None
+                    win_r = None
                 else:
                     if action == "check_in":
-                        grace_minutes = int(a.checkin_grace or 0)
-                    else:  # check_out
-                        if a.checkout_grace_hours is not None:
-                            grace_minutes = int(round(float(a.checkout_grace_hours) * 60))
-                        elif a.checkout_grace is not None:
-                            grace_minutes = int(a.checkout_grace)
-                        else:
-                            grace_minutes = 0
+                        # نافذة الحضور = [بداية الوردية, بداية + checkin_grace]
+                        grace_min = int(a.checkin_grace or 0)
+                        win_l = start_dt
+                        win_r = start_dt + timedelta(minutes=grace_min)
+                        ok = (win_l <= now_local <= win_r)
 
-                    anchor = getattr(a, "date", None) or None
-                    ok, sdt, edt = self._in_window(
-                        now_local, start_t, end_t,
-                        grace_minutes=grace_minutes,
-                        anchor_date=anchor
-                    )
+                    else:  # check_out
+                        # الانصراف مسموح فقط بعد (بداية + مدة السماح)
+                        if a.checkout_grace_hours is not None:
+                            threshold_min = int(round(float(a.checkout_grace_hours) * 60))
+                        elif a.checkout_grace is not None:
+                            threshold_min = int(a.checkout_grace)
+                        else:
+                            threshold_min = 0  # إن كانت None لكن هناك checkin_grace محدد فقط
+
+                        earliest = start_dt + timedelta(minutes=threshold_min)
+                        win_l = earliest
+                        win_r = None  # لا نضع سقف علوي هنا (إلا إذا أردت سقفًا إضافيًا)
+                        ok = (now_local >= earliest)
 
                 if not ok:
                     continue
 
-                # تحقق من الموقع (إن كان محددًا في التعيين)
+                # تطابق الموقع إذا كان محددًا في التعيين
                 if getattr(a, "location_id", None) and a.location_id != location.id:
                     continue
 
-                current_shift, shift_start_dt, shift_end_dt = sh, sdt, edt
+                current_shift, allowed_start, allowed_end = sh, win_l, win_r
                 break
 
-
-        # 2) لا تعتمد على جدول Shift العام (لا يوجد سقوط افتراضي)
+        # لا نسقط على ورديات عامة
         if current_shift is None:
             raise serializers.ValidationError("خارج أوقات الوردية الحالية.")
 
-        # تعبئة المخرجات
+        # تعبئة للخارج (سيقرأها الـ view لإظهارها للموبايل)
         attrs["employee"] = employee
         attrs["location_obj"] = location
         attrs["current_shift"] = current_shift
-        attrs["shift_window_start"] = shift_start_dt
-        attrs["shift_window_end"] = shift_end_dt
+        attrs["shift_window_start"] = allowed_start  # قد تكون None لو غير مقيّدة
+        attrs["shift_window_end"] = allowed_end      # قد تكون None لو غير مقيّدة أو في check_out
         return attrs
+       
+        
 
 
     # (اختياري) إنشاء سجل الحضور هنا بدل الـ View

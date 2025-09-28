@@ -246,6 +246,8 @@ class AttendanceCheckAPIView(APIView):
                     else "تم التحقق ضمن نافذة الوردية."
         }, status=status.HTTP_200_OK)
 
+# أدرج note و unrestriced و shift_window_start/end في JSON الرد كما فعلنا سابقًا.
+
 class ResolveLocationAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
