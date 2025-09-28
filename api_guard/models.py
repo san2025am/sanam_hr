@@ -198,6 +198,8 @@ class Shift(BaseModel):
         verbose_name = "6. وردية"
         verbose_name_plural = "6. الورديات"
 
+# models.py
+
 class EmployeeShiftAssignment(BaseModel):
     """
     يربط موظف بوردية معينة (يمكن أن تتكرر يومياً/أسبوعياً).
@@ -210,7 +212,7 @@ class EmployeeShiftAssignment(BaseModel):
         Shift, on_delete=models.PROTECT,
         related_name='employee_assignments', verbose_name="الوردية"
     )
-    date       = models.DateField(null=True, blank=True, verbose_name="التاريخ")  
+    date       = models.DateField(null=True, blank=True, verbose_name="تاريخ بداية الوردية")
     start_time = models.TimeField(null=True, blank=True, verbose_name="وقت بدء مخصص")
     end_time   = models.TimeField(null=True, blank=True, verbose_name="وقت انتهاء مخصص")
     location   = models.ForeignKey(
@@ -218,6 +220,22 @@ class EmployeeShiftAssignment(BaseModel):
         null=True, blank=True,
         related_name='shift_assignments', verbose_name="الموقع"
     )
+
+    # === سماحات مخصّصة (اختيارية) ===
+    checkin_grace  = models.PositiveIntegerField(
+        null=True, blank=True, verbose_name="سماح الحضور (دقائق)",
+        help_text="إن تُركت فارغة ⇒ لا سماح للحضور"
+    )
+    checkout_grace = models.PositiveIntegerField(
+        null=True, blank=True, verbose_name="سماح الانصراف (دقائق)",
+        help_text="تُستخدم فقط إذا كانت ساعات الانصراف فارغة"
+    )
+    checkout_grace_hours = models.DecimalField(
+        max_digits=4, decimal_places=2, null=True, blank=True,
+        verbose_name="سماح الانصراف (ساعات)",
+        help_text="إن تم تحديدها تتقدّم على الدقائق"
+    )
+
     active     = models.BooleanField(default=True, verbose_name="نشِطة؟")
     notes      = models.TextField(null=True, blank=True, verbose_name="ملاحظات")
 
@@ -229,7 +247,6 @@ class EmployeeShiftAssignment(BaseModel):
         verbose_name = "تعيين وردية لموظف"
         verbose_name_plural = "تعيينات الورديات للموظفين"
         unique_together = ('employee', 'shift', 'date', 'start_time', 'end_time')
-
 
 
 # ===================================================================

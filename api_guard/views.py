@@ -1,6 +1,7 @@
 # في ملف api_guard/views.py
 
-from time import timezone
+from django.utils import timezone as dj_timezone
+from django.db import transaction
 from rest_framework.views import APIView
 from rest_framework.response import Response
 
@@ -159,13 +160,12 @@ class GuardMeView(APIView):
     
 
     
-
-
 class AttendanceCheckAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
         ser = AttendanceCheckSerializer(data=request.data, context={"request": request})
+        # تحقّق من صحة البيانات وإرجاع رسالة مفصلة عند الخطأ
         if not ser.is_valid():
             return Response({"detail": ser.errors}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -176,26 +176,22 @@ class AttendanceCheckAPIView(APIView):
         lng      = ser.validated_data["lng"]
         acc      = ser.validated_data.get("accuracy")
         dist     = ser.validated_data.get("distance_m")
-        now      = timezone.now()
+        # استخدم المنطقة الزمنية نفسها التي يستخدمها serializer (dj_timezone)
+        now      = dj_timezone.now()
 
         if action == "check_in":
-            # امنع تكرار حضور مفتوح
+            # إن وجد سجل مفتوح، أغلقه تلقائيًا بتسجيل الانصراف
             open_rec = (AttendanceRecord.objects
                         .filter(employee=employee, check_out_time__isnull=True)
                         .order_by("-check_in_time").first())
             if open_rec:
-                return Response(
-                    {"detail": "لديك سجل حضور مفتوح بالفعل. سجّل الانصراف أولًا.",
-                     "record_id": str(open_rec.id)},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+                open_rec.check_out_time = now
+                open_rec.notes = (open_rec.notes or "") + f" | auto-out lat={lat}, lng={lng}, acc={acc}, dist={dist}"
+                open_rec.location = open_rec.location or location
+                open_rec.save(update_fields=["check_out_time", "notes", "location"])
 
-            rec = AttendanceRecord.objects.create(
-                employee=employee,
-                location=location,
-                check_in_time=now,
-                notes=f"in lat={lat}, lng={lng}, acc={acc}, dist={dist}"
-            )
+            # استخدم الـ serializer لإنشاء سجل الحضور مع ربطه بالوردية الحالية
+            rec = ser.save()
             return Response({
                 "detail": "تم تسجيل الحضور بنجاح.",
                 "record_id": str(rec.id),
@@ -203,9 +199,17 @@ class AttendanceCheckAPIView(APIView):
                 "location": location.name,
                 "within_radius": True,
                 "distance": round(dist or 0.0, 2),
+                # رسائل توضيحية:
+                "unrestricted": True if ser.validated_data.get("shift_window_start") is None else False,
+                "shift_window_start": ser.validated_data.get("shift_window_start"),
+                "shift_window_end": ser.validated_data.get("shift_window_end"),
+                "note": "الوردية غير مقيّدة زمنيًا، سُمح بالحضور في أي وقت."
+                        if ser.validated_data.get("shift_window_start") is None
+                        else "تم التحقق ضمن نافذة الوردية."
             }, status=status.HTTP_201_CREATED)
 
-        # check_out
+
+        # check_out: أولاً تأكد من وجود سجل مفتوح
         rec = (AttendanceRecord.objects
                .filter(employee=employee, check_out_time__isnull=True)
                .order_by("-check_in_time").first())
@@ -213,13 +217,20 @@ class AttendanceCheckAPIView(APIView):
             return Response({"detail": "لا يوجد سجل حضور مفتوح لإقفاله."},
                             status=status.HTTP_400_BAD_REQUEST)
 
+        # تحقق من كون الموظف داخل نافذة الوردية قبل السماح بالانصراف
+        # استخدم shift_window_start و shift_window_end من serializer للتحقق
+        start_dt = ser.validated_data.get("shift_window_start")
+        end_dt   = ser.validated_data.get("shift_window_end")
+        if start_dt and end_dt:
+            # لا تسمح بالانصراف خارج نافذة الوردية الموسعة (مع التسامح)
+            if not (start_dt <= dj_timezone.localtime(now) <= end_dt):
+                return Response({"detail": "لا يمكن تسجيل الانصراف خارج أوقات الوردية الحالية."},
+                                status=status.HTTP_400_BAD_REQUEST)
+
         rec.check_out_time = now
-        note_suffix = f" | out lat={lat}, lng={lng}, acc={acc}, dist={dist}"
-        rec.notes = (rec.notes or "") + note_suffix
-        # لو الحضور لم يُسجل موقعاً لأي سبب، ثبّت الموقع
+        rec.notes = (rec.notes or "") + f" | out lat={lat}, lng={lng}, acc={acc}, dist={dist}"
         rec.location = rec.location or location
         rec.save(update_fields=["check_out_time", "notes", "location"])
-
         return Response({
             "detail": "تم تسجيل الانصراف بنجاح.",
             "record_id": str(rec.id),
@@ -227,8 +238,13 @@ class AttendanceCheckAPIView(APIView):
             "location": rec.location.name if rec.location else None,
             "within_radius": True,
             "distance": round(dist or 0.0, 2),
+            "unrestricted": True if ser.validated_data.get("shift_window_start") is None else False,
+            "shift_window_start": ser.validated_data.get("shift_window_start"),
+            "shift_window_end": ser.validated_data.get("shift_window_end"),
+            "note": "الوردية غير مقيّدة زمنيًا، سُمح بالانصراف في أي وقت."
+                    if ser.validated_data.get("shift_window_start") is None
+                    else "تم التحقق ضمن نافذة الوردية."
         }, status=status.HTTP_200_OK)
-
 
 class ResolveLocationAPIView(APIView):
     permission_classes = [IsAuthenticated]
@@ -256,7 +272,7 @@ class ResolveLocationAPIView(APIView):
 
         data = {
             "detail": "تم تحديد الموقع",
-            "location_id": str(loc.id),      # ← مهم: UUID كنص
+            "location_id": str(loc.id),  # UUID كنص
             "name": loc.name,
             "client_name": loc.client_name,
             "lat": la, "lng": ln,
@@ -265,3 +281,4 @@ class ResolveLocationAPIView(APIView):
             "mode": mode,  # polygon | radius
         }
         return Response(data, status=200)
+
