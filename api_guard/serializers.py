@@ -247,6 +247,7 @@ class EmployeeMeSerializer(serializers.ModelSerializer):
             "locations", "salary",
             "tasks", "shifts",
             'shift_assignments',
+            'early_check_out', 'early_reason', 'early_attachment',
         ]
 
     def get_role_label(self, obj):
@@ -522,8 +523,25 @@ class AttendanceCheckSerializer(serializers.Serializer):
                 a.checkout_grace_hours is None
             )
 
-            anchor = getattr(a, "date", None) or None
-            start_dt, end_dt = self._anchor_times(now_local, start_t, end_t, anchor_date=anchor)
+            # تحديد التاريخ الأساسي (anchor_date) لحساب أوقات البدء والنهاية. في الحالات العادية نستخدم
+            # تاريخ التعيين (a.date) إن وجد، ولكن إذا كانت الوردية ليلية (أي وقت النهاية أصغر أو يساوي وقت البداية)
+            # فإننا نضبط التاريخ وفقًا لوقت الآن بحيث يمتد عبر منتصف الليل. إذا كان الوقت الحالي بعد منتصف الليل
+            # وأصغر من وقت نهاية الوردية، فهذا يعني أننا في يوم اليوم التالي للوردية وبالتالي يجب أن يكون anchor_date
+            # هو اليوم السابق؛ وإلا فسيكون anchor_date هو تاريخ اليوم الحالي.
+            anchor_date = getattr(a, "date", None)
+            if start_t and end_t and end_t <= start_t:
+                try:
+                    now_time = now_local.time()
+                    if now_time <= end_t:
+                        # نحن بعد منتصف الليل وقبل نهاية الوردية، اربط التاريخ باليوم السابق
+                        anchor_date = (now_local - timedelta(days=1)).date()
+                    else:
+                        # الوقت الحالي بعد بداية الوردية وقبل منتصف الليل في اليوم الحالي
+                        anchor_date = now_local.date()
+                except Exception:
+                    anchor_date = getattr(a, "date", None)
+            # حساب أوقات البدء والنهاية مع anchor_date المحدث
+            start_dt, end_dt = self._anchor_times(now_local, start_t, end_t, anchor_date=anchor_date)
 
             ok = False
             win_l = win_r = None

@@ -158,8 +158,7 @@ class GuardMeView(APIView):
 
         return Response(EmployeeMeSerializer(emp).data, status=status.HTTP_200_OK)
     
-
-    
+ 
 
 class AttendanceCheckAPIView(APIView):
     permission_classes = [IsAuthenticated]
