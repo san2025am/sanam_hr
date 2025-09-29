@@ -336,19 +336,22 @@ class EmployeeMeSerializer(serializers.ModelSerializer):
 
 
 
+
 class AttendanceCheckSerializer(serializers.Serializer):
     location_id = serializers.UUIDField()
-    action = serializers.ChoiceField(choices=[("check_in", "check_in"), ("check_out", "check_out")])
+    action = serializers.ChoiceField(choices=[("check_in", "check_in"),
+                                             ("check_out", "check_out"),
+                                             ("early_check_out", "early_check_out")])
     lat = serializers.FloatField()
     lng = serializers.FloatField()
     accuracy = serializers.FloatField(required=False, min_value=0, default=9999)
 
-    # ===== Helpers (داخل الكلاس) =====
+    # ===== أدوات مساعدة =====
     @staticmethod
     def _haversine_m(lat1, lon1, lat2, lon2):
-        """حساب المسافة بالمتر بين نقطتين جغرافيتين."""
+        """المسافة بالمتر بين نقطتين."""
         from math import radians, sin, cos, asin, sqrt
-        R = 6371000.0  # متر
+        R = 6371000.0
         dlat = radians(lat2 - lat1)
         dlon = radians(lon2 - lon1)
         a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon/2)**2
@@ -357,10 +360,7 @@ class AttendanceCheckSerializer(serializers.Serializer):
 
     @staticmethod
     def _point_in_polygon(point, polygon):
-        """
-        خوارزمية ray casting بسيطة:
-        point: (lat, lng), polygon: [(lat, lng), ...] بترتيب مغلق/مفتوح.
-        """
+        """Ray casting: point=(lat,lng), polygon=[(lat,lng), ...]."""
         x, y = point
         inside = False
         n = len(polygon)
@@ -377,51 +377,20 @@ class AttendanceCheckSerializer(serializers.Serializer):
         return inside
 
     @staticmethod
-    def _in_window(now_local, start_t, end_t, grace_minutes=0, anchor_date=None):
-        """
-        يتحقق أن now_local داخل نافذة الوردية المرتكزة على anchor_date (إن وُجد).
-        يدعم الوردية الليلية + تسامح بالدقائق. بدون أي قيم افتراضية.
-        """
-        if anchor_date is None:
-            base = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-        else:
-            base = now_local.replace(
-                year=anchor_date.year, month=anchor_date.month, day=anchor_date.day,
-                hour=0, minute=0, second=0, microsecond=0
-            )
-        start_dt = base.replace(hour=start_t.hour, minute=start_t.minute)
-        end_dt   = base.replace(hour=end_t.hour,   minute=end_t.minute)
-
-        # وردية ليلية؟
-        if end_t <= start_t:
-            end_dt += timedelta(days=1)
-
-        grace = timedelta(minutes=int(grace_minutes or 0))
-        inside = (start_dt - grace) <= now_local <= (end_dt + grace)
-        return inside, start_dt, end_dt
-
-   
-
-    @staticmethod
     def _anchor_times(now_local, start_t, end_t, anchor_date=None):
-        """
-        يُرجع (start_dt, end_dt) لوردية تُرتكز على anchor_date (إن وجد)،
-        ويدعم الوردية الليلية (end_t <= start_t).
-        """
+        """إرجاع (start_dt, end_dt) مع دعم الوردية الليلية."""
         if anchor_date is None:
             base = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
         else:
-            base = now_local.replace(
-                year=anchor_date.year, month=anchor_date.month, day=anchor_date.day,
-                hour=0, minute=0, second=0, microsecond=0
-            )
+            base = now_local.replace(year=anchor_date.year, month=anchor_date.month, day=anchor_date.day,
+                                     hour=0, minute=0, second=0, microsecond=0)
         start_dt = base.replace(hour=start_t.hour, minute=start_t.minute)
         end_dt   = base.replace(hour=end_t.hour,   minute=end_t.minute)
         if end_t <= start_t:
             end_dt += timedelta(days=1)
         return start_dt, end_dt
 
-    # ====== Validation ======
+    # ===== التحقق =====
     def validate(self, attrs):
         request = self.context["request"]
         user = request.user
@@ -432,7 +401,7 @@ class AttendanceCheckSerializer(serializers.Serializer):
         except Employee.DoesNotExist:
             raise serializers.ValidationError("لا يوجد ملف موظف مرتبط بهذا الحساب.")
 
-        # الموقع (جرّب بالـ pk ثم uuid لدعم الحالتين)
+        # الموقع: ندعم pk/uuid
         try:
             location = Location.objects.get(id=attrs["location_id"])
         except Location.DoesNotExist:
@@ -443,38 +412,68 @@ class AttendanceCheckSerializer(serializers.Serializer):
 
         lat, lng = attrs["lat"], attrs["lng"]
         acc = attrs.get("accuracy", 9999.0)
+        action = (attrs.get("action") or "").strip().lower()
 
-        # سياسة الدقة: لا تتجاوز نصف القطر إن كان محددًا
+        # سياسة الدقة (اختياري): لا تتجاوز نصف القطر إن كان محددًا
         if getattr(location, "gps_radius", None):
             try:
                 if acc > float(location.gps_radius):
-                    raise serializers.ValidationError("دقة الموقع ضعيفة. الرجاء المحاولة مرة أخرى بالقرب من الموقع.")
+                    # لا نرفع 400، نمنع مهذباً
+                    attrs.update({
+                        "employee": employee,
+                        "location_obj": location,
+                        "blocked": True,
+                        "blocked_reason": "⚠️ دقة تحديد الموقع ضعيفة. اقترب من الموقع وحاول مجددًا.",
+                    })
+                    return attrs
             except (TypeError, ValueError):
-                pass  # تجاهل لو القيمة غير قابلة للتحويل
+                pass
 
-        # فحص المضلّع أولًا إن مُفعّل
+        # فحص polygon إن مُفعّل
         inside_polygon = None
         if getattr(location, "use_polygon", False) and getattr(location, "polygon_coords", None):
             try:
-                poly = location.polygon_coords
-                # إن كانت JSON نصيّة:
-                # if isinstance(poly, str):
-                #     import json; poly = json.loads(poly)
+                poly = location.polygon_coords  # إمّا list أو JSON تم تحويله مسبقًا في الموديل
                 polygon = [(float(p[0]), float(p[1])) for p in poly]
                 inside_polygon = self._point_in_polygon((lat, lng), polygon)
             except Exception:
-                raise serializers.ValidationError("تنسيق المضلّع غير صالح في إعدادات الموقع.")
+                # نعتبره منع مهذّب بدلاً من 400
+                attrs.update({
+                    "employee": employee,
+                    "location_obj": location,
+                    "blocked": True,
+                    "blocked_reason": "⚠️ تنسيق حدود الموقع غير صالح. راجع الإدارة.",
+                })
+                return attrs
             if not inside_polygon:
-                raise serializers.ValidationError("النقطة خارج حدود الموقع المحددة (Polygon).")
+                attrs.update({
+                    "employee": employee,
+                    "location_obj": location,
+                    "blocked": True,
+                    "blocked_reason": "⚠️ أنت خارج حدود الموقع المحددة.",
+                })
+                return attrs
 
-        # إن لم يُستخدم المضلع نطبق فحص نصف القطر
+        # إن لم يُستخدم المضلع نطبّق نصف القطر
         if not (getattr(location, "use_polygon", False) and inside_polygon):
             if not getattr(location, "gps_coordinates", None):
-                raise serializers.ValidationError("إحداثيات الموقع غير مُعرّفة. راجع لوحة الإدارة.")
+                attrs.update({
+                    "employee": employee,
+                    "location_obj": location,
+                    "blocked": True,
+                    "blocked_reason": "⚠️ لم تُعرّف إحداثيات الموقع. راجع الإدارة.",
+                })
+                return attrs
             try:
                 loc_lat, loc_lng = [float(x.strip()) for x in location.gps_coordinates.split(",", 1)]
             except Exception:
-                raise serializers.ValidationError("تنسيق إحداثيات الموقع غير صحيح في لوحة الإدارة.")
+                attrs.update({
+                    "employee": employee,
+                    "location_obj": location,
+                    "blocked": True,
+                    "blocked_reason": "⚠️ تنسيق إحداثيات الموقع غير صحيح. راجع الإدارة.",
+                })
+                return attrs
             dist = self._haversine_m(lat, lng, loc_lat, loc_lng)
             attrs["distance_m"] = dist
             try:
@@ -482,115 +481,149 @@ class AttendanceCheckSerializer(serializers.Serializer):
             except Exception:
                 radius = 0.0
             if radius and dist > radius:
-                raise serializers.ValidationError(f"خارج النطاق المسموح ({radius}م). المسافة: {round(dist)}م.")
+                attrs.update({
+                    "employee": employee,
+                    "location_obj": location,
+                    "blocked": True,
+                    "blocked_reason": f"⚠️ خارج النطاق المسموح ({int(radius)}م). المسافة الحالية: {int(round(dist))}م.",
+                })
+                return attrs
 
-        # ===== حساب الوردية الحالية =====
-        # ===== حساب الوردية ا
+        # ===== حساب نافذة الوردية/السماحات =====
         now_aware = dj_timezone.now()
         now_local = dj_timezone.localtime(now_aware)
-        action = (attrs.get("action") or "").strip().lower()
 
         current_shift = None
-        allowed_start = allowed_end = None  # سنملؤهما للعرض في الرد
+        allowed_start = allowed_end = None  # لعرضها في الرد
 
-        if HAS_ASSIGN:
-            assign_qs = (EmployeeShiftAssignment.objects
-                        .select_related("shift", "location")
-                        .filter(employee=employee, active=True)
-                        .order_by('-date', '-start_time', '-end_time'))
+        # نبحث في تعيينات الموظف الفعالة
+        assign_qs = (EmployeeShiftAssignment.objects
+                     .select_related("shift", "location")
+                     .filter(employee=employee, active=True)
+                     .order_by('-date', '-start_time', '-end_time'))
 
-            for a in assign_qs:
-                sh = getattr(a, "shift", None)
-                if not sh:
-                    continue
+        for a in assign_qs:
+            sh = getattr(a, "shift", None)
+            if not sh:
+                continue
 
-                start_t = getattr(a, "start_time", None) or getattr(sh, "start_time", None)
-                end_t   = getattr(a, "end_time",   None) or getattr(sh, "end_time",   None)
-                if not (start_t and end_t):
-                    continue
+            start_t = getattr(a, "start_time", None) or getattr(sh, "start_time", None)
+            end_t   = getattr(a, "end_time",   None) or getattr(sh, "end_time",   None)
+            if not (start_t and end_t):
+                continue
 
-                # غير مقيّدة لو الثلاثة None
-                unrestricted = (
-                    a.checkin_grace is None and
-                    a.checkout_grace is None and
-                    a.checkout_grace_hours is None
-                )
+            # إن كان التعيين مرتبطًا بموقع محدد، تأكد التطابق
+            if getattr(a, "location_id", None) and a.location_id != location.id:
+                continue
 
-                anchor = getattr(a, "date", None) or None
-                start_dt, end_dt = self._anchor_times(now_local, start_t, end_t, anchor_date=anchor)
+            unrestricted = (
+                a.checkin_grace is None and
+                a.checkout_grace is None and
+                a.checkout_grace_hours is None
+            )
 
-                ok = False
-                win_l = win_r = None
+            anchor = getattr(a, "date", None) or None
+            start_dt, end_dt = self._anchor_times(now_local, start_t, end_t, anchor_date=anchor)
 
-                if unrestricted:
+            ok = False
+            win_l = win_r = None
+
+            if unrestricted:
+                ok = True
+                win_l = None
+                win_r = None
+            else:
+                if action == "check_in":
+                    # مسموح فقط من بداية الوردية حتى بداية + checkin_grace
+                    grace_min = int(a.checkin_grace or 0)
+                    win_l = start_dt
+                    win_r = start_dt + timedelta(minutes=grace_min)
+                    ok = (win_l <= now_local <= win_r)
+
+                elif action == "check_out":
+                    # انصراف فقط بعد (بداية + checkout_grace[_hours])
+                    if a.checkout_grace_hours is not None:
+                        threshold_min = int(round(float(a.checkout_grace_hours) * 60))
+                    elif a.checkout_grace is not None:
+                        threshold_min = int(a.checkout_grace)
+                    else:
+                        threshold_min = 0
+                    earliest = start_dt + timedelta(minutes=threshold_min)
+                    win_l, win_r = earliest, None
+                    ok = (now_local >= earliest)
+
+                else:  # early_check_out: لا شرط وقت
                     ok = True
-                    win_l = None
-                    win_r = None
+                    win_l, win_r = None, None
+
+            if not ok:
+                # منع مهذّب برسالة واضحة (بدون raise)
+                if action == "check_in":
+                    reason = (f"⚠️ لا يمكن تسجيل الحضور الآن. "
+                              f"فترة السماح للحضور انتهت عند { (start_dt + timedelta(minutes=int(a.checkin_grace or 0))).strftime('%H:%M') }.")
                 else:
-                    if action == "check_in":
-                        # نافذة الحضور = [بداية الوردية, بداية + checkin_grace]
-                        grace_min = int(a.checkin_grace or 0)
-                        win_l = start_dt
-                        win_r = start_dt + timedelta(minutes=grace_min)
-                        ok = (win_l <= now_local <= win_r)
+                    # check_out
+                    if a.checkout_grace_hours is not None:
+                        reason = f"⚠️ لا يمكن تسجيل الانصراف قبل مرور {a.checkout_grace_hours} ساعة من بداية الوردية."
+                    elif a.checkout_grace is not None:
+                        reason = f"⚠️ لا يمكن تسجيل الانصراف قبل مرور {a.checkout_grace} دقيقة من بداية الوردية."
+                    else:
+                        reason = "⚠️ الانصراف غير مسموح في الوقت الحالي."
+                attrs.update({
+                    "employee": employee,
+                    "location_obj": location,
+                    "blocked": True,
+                    "blocked_reason": reason,
+                    "shift_window_start": win_l,
+                    "shift_window_end": win_r,
+                    "current_shift": sh,
+                })
+                return attrs
 
-                    else:  # check_out
-                        # الانصراف مسموح فقط بعد (بداية + مدة السماح)
-                        if a.checkout_grace_hours is not None:
-                            threshold_min = int(round(float(a.checkout_grace_hours) * 60))
-                        elif a.checkout_grace is not None:
-                            threshold_min = int(a.checkout_grace)
-                        else:
-                            threshold_min = 0  # إن كانت None لكن هناك checkin_grace محدد فقط
+            # تطابق: نعتمد هذه الوردية
+            current_shift, allowed_start, allowed_end = sh, win_l, win_r
+            break
 
-                        earliest = start_dt + timedelta(minutes=threshold_min)
-                        win_l = earliest
-                        win_r = None  # لا نضع سقف علوي هنا (إلا إذا أردت سقفًا إضافيًا)
-                        ok = (now_local >= earliest)
-
-                if not ok:
-                    continue
-
-                # تطابق الموقع إذا كان محددًا في التعيين
-                if getattr(a, "location_id", None) and a.location_id != location.id:
-                    continue
-
-                current_shift, allowed_start, allowed_end = sh, win_l, win_r
-                break
-
-        # لا نسقط على ورديات عامة
         if current_shift is None:
-            raise serializers.ValidationError("خارج أوقات الوردية الحالية.")
+            # خارج أية وردية — منـع مهذّب
+            attrs.update({
+                "employee": employee,
+                "location_obj": location,
+                "blocked": True,
+                "blocked_reason": "⚠️ خارج أوقات الوردية الحالية. يرجى مراجعة المشرف.",
+                "shift_window_start": None,
+                "shift_window_end": None,
+                "current_shift": None,
+            })
+            return attrs
 
-        # تعبئة للخارج (سيقرأها الـ view لإظهارها للموبايل)
-        attrs["employee"] = employee
-        attrs["location_obj"] = location
-        attrs["current_shift"] = current_shift
-        attrs["shift_window_start"] = allowed_start  # قد تكون None لو غير مقيّدة
-        attrs["shift_window_end"] = allowed_end      # قد تكون None لو غير مقيّدة أو في check_out
+        # تعبئة نتائج التحقق
+        attrs.update({
+            "employee": employee,
+            "location_obj": location,
+            "current_shift": current_shift,
+            "shift_window_start": allowed_start,   # قد تكون None لو غير مقيّدة
+            "shift_window_end": allowed_end,       # قد تكون None
+            "blocked": False,
+            "blocked_reason": None,
+            "now_local": now_local,
+        })
         return attrs
-       
-        
 
-
-    # (اختياري) إنشاء سجل الحضور هنا بدل الـ View
-    def create(self, validated_data):
-        from .models import AttendanceRecord  # استيراد محلي لتجنّب الدورات
-        if validated_data["action"] == "check_in":
+    def create(self, validated):
+        """إنشاء سجل الحضور عند check_in، التحديث للانصراف يتم في الـ View."""
+        if validated["action"] == "check_in":
             rec = AttendanceRecord.objects.create(
-                employee=validated_data["employee"],
-                location=validated_data["location_obj"],
-                shift=validated_data.get("current_shift"),
+                employee=validated["employee"],
+                location=validated["location_obj"],
+                shift=validated.get("current_shift"),
                 check_in_time=dj_timezone.now(),
-                notes=(
-                    f"in lat={validated_data['lat']}, "
-                    f"lng={validated_data['lng']}, "
-                    f"acc={validated_data.get('accuracy')}, "
-                    f"dist={round(validated_data.get('distance_m') or 0.0, 2)}"
-                ),
+                notes=(f"in lat={validated['lat']}, lng={validated['lng']}, "
+                       f"acc={validated.get('accuracy')}, "
+                       f"dist={round(validated.get('distance_m') or 0.0, 2)}"),
             )
             return rec
-        return None  # check_out تتم في الـ View بالتحديث
+        return None
 
 class ResolveLocationSerializer(serializers.Serializer):
     lat = serializers.FloatField()

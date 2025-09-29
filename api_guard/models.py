@@ -264,6 +264,11 @@ class AttendanceRecord(BaseModel):
     work_type = models.CharField(max_length=20, choices=WORK_TYPE_CHOICES, default='official', verbose_name="نوع الدوام")
     notes = models.TextField(blank=True, null=True, verbose_name="ملاحظات")
 
+    early_checkout  = models.BooleanField(default=False)
+    early_reason    = models.TextField(null=True, blank=True)
+    early_attachment = models.FileField(upload_to="early_checkout/", null=True, blank=True)
+
+
     def __str__(self): return f"{self.employee.full_name} - {self.check_in_time.strftime('%Y-%m-%d')}"
 
     class Meta:

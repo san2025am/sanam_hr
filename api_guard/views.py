@@ -161,18 +161,37 @@ class GuardMeView(APIView):
 
     
 
-
 class AttendanceCheckAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
+    def _deny(self, *, action, detail, reason_code, start=None, end=None, now=None, extra=None):
+        payload = {
+            "ok": False,
+            "performed": False,      # لم تُنفّذ العملية
+            "action": action,
+            "detail": detail,        # نص مهذّب للمستخدم
+            "reason_code": reason_code,
+        }
+        wnd = {}
+        if start is not None: wnd["from"] = start
+        if end   is not None: wnd["to"]   = end
+        if now   is not None: wnd["now"]  = now
+        if wnd: payload["window"] = wnd
+        if extra: payload.update(extra)
+        # نرجع 200 حتى لا يظهر "HTTP 400" في التطبيق
+        return Response(payload, status=status.HTTP_200_OK)
+
     def post(self, request):
         ser = AttendanceCheckSerializer(data=request.data, context={"request": request})
-
-        # التحقق من صحة البيانات
         if not ser.is_valid():
-            return Response({"detail": ser.errors}, status=status.HTTP_400_BAD_REQUEST)
+            # أخطاء إدخال (حقول ناقصة/قيمة غير صالحة) — نعيد 200 برسالة لطيفة أيضاً
+            return Response({
+                "ok": False, "performed": False,
+                "action": request.data.get("action"),
+                "detail": "تعذر معالجة الطلب. الرجاء التحقق من الحقول المدخلة.",
+                "errors": ser.errors
+            }, status=status.HTTP_200_OK)
 
-        # بيانات جاهزة من الـ serializer
         action   = ser.validated_data["action"]
         employee = ser.validated_data["employee"]
         location = ser.validated_data["location_obj"]
@@ -181,13 +200,26 @@ class AttendanceCheckAPIView(APIView):
         acc      = ser.validated_data.get("accuracy")
         dist     = ser.validated_data.get("distance_m")
 
-        # استخدم نفس المنطقة الزمنية (محلي)
         now       = dj_timezone.now()
         now_local = dj_timezone.localtime(now)
 
-        # ==== تسجيل الحضور ====
+        start_dt = ser.validated_data.get("shift_window_start")
+        end_dt   = ser.validated_data.get("shift_window_end")
+        blocked  = ser.validated_data.get("blocked")
+        reason   = ser.validated_data.get("blocked_reason")
+
+        # لو الـ serializer قرر المنع، نرجع رسالة فقط بدون تنفيذ
+        if blocked:
+            return self._deny(
+                action=action,
+                detail=reason or "⚠️ لا يمكن تنفيذ العملية في الوقت الحالي.",
+                reason_code="business_rule_violation",
+                start=start_dt, end=end_dt, now=now_local
+            )
+
+        # ===== تنفيذ العمليات =====
         if action == "check_in":
-            # إن وجد سجل مفتوح للحارس، أغلقه تلقائياً قبل إنشاء سجل جديد
+            # (اختياري) أغلق تلقائيًا أي سجل مفتوح
             open_rec = (AttendanceRecord.objects
                         .filter(employee=employee, check_out_time__isnull=True)
                         .order_by("-check_in_time").first())
@@ -197,116 +229,70 @@ class AttendanceCheckAPIView(APIView):
                 open_rec.location = open_rec.location or location
                 open_rec.save(update_fields=["check_out_time", "notes", "location"])
 
-            # أنشئ سجل الحضور عبر السيريلایزر (يربط الوردية الحالية)
-            rec = ser.save()
-
-            unrestricted = (
-                ser.validated_data.get("shift_window_start") is None and
-                ser.validated_data.get("shift_window_end")   is None
-            )
-
-            # رسالة توضيحية للحضور:
-            if unrestricted:
-                note = "الوردية غير مقيّدة زمنيًا، سُمح بالحضور في أي وقت."
-            else:
-                note = (
-                    "تم التحقق ضمن نافذة الحضور المسموحة: "
-                    f"{ser.validated_data['shift_window_start']} → {ser.validated_data['shift_window_end']}"
-                )
-
+            rec = ser.save()  # إنشاء سجل الحضور
             return Response({
-                "detail": "تم تسجيل الحضور بنجاح.",
+                "ok": True, "performed": True, "action": action,
+                "detail": "✅ تم تسجيل حضورك بنجاح.",
+                "note": ("الوردية غير مقيّدة زمنيًا." if start_dt is None and end_dt is None
+                         else (f"الفترة المسموحة للحضور: {start_dt.strftime('%H:%M')} → {end_dt.strftime('%H:%M')}" if start_dt and end_dt else "")),
                 "record_id": str(rec.id),
-                "employee": employee.full_name,
-                "location": location.name,
-                "within_radius": True,
-                "distance": round(dist or 0.0, 2),
-
-                # معلومات الوردية لواجهة الموبايل:
-                "unrestricted": unrestricted,
-                "shift_window_start": ser.validated_data.get("shift_window_start"),
-                "shift_window_end": ser.validated_data.get("shift_window_end"),
-                "note": note,
+                "employee": getattr(employee, "full_name", str(employee.pk)),
+                "location": getattr(location, "name", str(location.pk)),
             }, status=status.HTTP_201_CREATED)
 
-        # ==== تسجيل الانصراف ====
+        elif action == "check_out":
+            rec = (AttendanceRecord.objects
+                   .filter(employee=employee, check_out_time__isnull=True)
+                   .order_by("-check_in_time").first())
+            if not rec:
+                return self._deny(action=action, detail="لا يوجد سجل حضور مفتوح لإقفاله.", reason_code="no_open_record")
 
-        # يجب أن يوجد سجل حضور مفتوح
-        rec = (AttendanceRecord.objects
-               .filter(employee=employee, check_out_time__isnull=True)
-               .order_by("-check_in_time").first())
-        if not rec:
-            return Response({"detail": "لا يوجد سجل حضور مفتوح لإقفاله."},
-                            status=status.HTTP_400_BAD_REQUEST)
+            rec.check_out_time = now
+            rec.notes = (rec.notes or "") + f" | out lat={lat}, lng={lng}, acc={acc}, dist={dist}"
+            rec.location = rec.location or location
+            rec.save(update_fields=["check_out_time", "notes", "location"])
 
-        # استخدم حدود النافذة القادمة من السيريلایزر:
-        # - للحضور: نافذة كاملة [start..end]
-        # - للانصراف: حد أدنى فقط (start فقط) → end=None
-        start_dt = ser.validated_data.get("shift_window_start")
-        end_dt   = ser.validated_data.get("shift_window_end")
+            return Response({
+                "ok": True, "performed": True, "action": action,
+                "detail": "✅ تم تسجيل انصرافك بنجاح.",
+                "note": ("الوردية غير مقيّدة زمنيًا."
+                         if (start_dt is None and end_dt is None)
+                         else (f"يمكن الانصراف اعتبارًا من: {start_dt.strftime('%H:%M')}" if start_dt else "")),
+                "record_id": str(rec.id),
+                "employee": getattr(employee, "full_name", str(employee.pk)),
+                "location": getattr(rec.location, "name", None) if rec.location else None,
+            }, status=status.HTTP_200_OK)
 
-        # حالات التحقق للانصراف:
-        # 1) نافذة كاملة: يجب أن يكون الآن بين البداية والنهاية
-        if start_dt is not None and end_dt is not None:
-            if not (start_dt <= now_local <= end_dt):
-                return Response(
-                    {"detail": "لا يمكن تسجيل الانصراف خارج نافذة الوردية الحالية."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+        elif action == "early_check_out":
+            reason_txt = (request.data.get("early_reason") or "").strip()
+            file_obj = request.FILES.get("early_attachment")
+            if not reason_txt:
+                return self._deny(action=action, detail="يجب كتابة سبب الانصراف المبكر.", reason_code="early_checkout_reason_required")
 
-        # 2) حد أدنى فقط: يسمح فقط إذا الآن >= start_dt
-        elif start_dt is not None and end_dt is None:
-            if now_local < start_dt:
-                return Response(
-                    {"detail": "لا يمكن تسجيل الانصراف قبل الوقت المسموح به."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+            rec = (AttendanceRecord.objects
+                   .filter(employee=employee, check_out_time__isnull=True)
+                   .order_by("-check_in_time").first())
+            if not rec:
+                return self._deny(action=action, detail="لا يوجد سجل حضور مفتوح لإقفاله.", reason_code="no_open_record")
 
-        # 3) نهاية فقط (حالة نادرة): اشترط الآن ≤ end_dt
-        elif start_dt is None and end_dt is not None:
-            if now_local > end_dt:
-                return Response(
-                    {"detail": "لا يمكن تسجيل الانصراف بعد نهاية نافذة الوردية."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+            rec.check_out_time = now
+            rec.early_checkout = True
+            rec.early_reason   = reason_txt
+            if file_obj:
+                rec.early_attachment = file_obj
+            rec.notes = (rec.notes or "") + f" | early-out lat={lat}, lng={lng}, acc={acc}, dist={dist}"
+            rec.location = rec.location or location
+            rec.save()
 
-        # 4) كلاهما None ⇒ غير مقيّدة زمنيًا (مسموح بأي وقت)
-        # لا حاجة لشرط.
+            return Response({
+                "ok": True, "performed": True, "action": action,
+                "detail": "✅ تم تسجيل الانصراف المبكر.",
+                "early_checkout": True,
+                "early_reason": reason_txt,
+            }, status=status.HTTP_200_OK)
 
-        # أغلق السجل
-        rec.check_out_time = now
-        rec.notes = (rec.notes or "") + f" | out lat={lat}, lng={lng}, acc={acc}, dist={dist}"
-        rec.location = rec.location or location
-        rec.save(update_fields=["check_out_time", "notes", "location"])
-
-        unrestricted = (start_dt is None and end_dt is None)
-        # رسالة توضيحية للانصراف:
-        if unrestricted:
-            note = "الوردية غير مقيّدة زمنيًا، سُمح بالانصراف في أي وقت."
-        else:
-            # إن كان لدينا حد أدنى فقط
-            if start_dt is not None and end_dt is None:
-                note = f"يمكن الانصراف اعتبارًا من: {start_dt}"
-            # نافذة كاملة
-            elif start_dt is not None and end_dt is not None:
-                note = f"تم التحقق ضمن نافذة الوردية: {start_dt} → {end_dt}"
-            else:
-                note = "تم التحقق من شروط الانصراف."
-
-        return Response({
-            "detail": "تم تسجيل الانصراف بنجاح.",
-            "record_id": str(rec.id),
-            "employee": employee.full_name,
-            "location": rec.location.name if rec.location else None,
-            "within_radius": True,
-            "distance": round(dist or 0.0, 2),
-
-            "unrestricted": unrestricted,
-            "shift_window_start": start_dt,
-            "shift_window_end": end_dt,
-            "note": note,
-        }, status=status.HTTP_200_OK)
-# أدرج note و unrestriced و shift_window_start/end في JSON الرد كما فعلنا سابقًا.
+        # إجراء غير مدعوم
+        return self._deny(action=action, detail="إجراء غير مدعوم.", reason_code="unsupported_action")
 
 class ResolveLocationAPIView(APIView):
     permission_classes = [IsAuthenticated]
