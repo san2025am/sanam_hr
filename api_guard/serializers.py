@@ -247,7 +247,6 @@ class EmployeeMeSerializer(serializers.ModelSerializer):
             "locations", "salary",
             "tasks", "shifts",
             'shift_assignments',
-            # 'early_check_out', 'early_reason', 'early_attachment',
         ]
 
     def get_role_label(self, obj):
@@ -338,28 +337,24 @@ class EmployeeMeSerializer(serializers.ModelSerializer):
 
 
 
-
 class AttendanceCheckSerializer(serializers.Serializer):
     location_id = serializers.UUIDField()
-    action = serializers.ChoiceField(choices=[
-        ("check_in", "check_in"),
-        ("check_out", "check_out"),
-        ("early_check_out", "early_check_out"),
-    ])
+    action = serializers.ChoiceField(choices=[("check_in", "check_in"),
+                                             ("check_out", "check_out"),
+                                             ("early_check_out", "early_check_out")])
     lat = serializers.FloatField()
     lng = serializers.FloatField()
     accuracy = serializers.FloatField(required=False, min_value=0, default=9999)
-    early_reason = serializers.CharField(required=False, allow_blank=True)
 
-    # ===== Helpers =====
+    # ===== أدوات مساعدة =====
     @staticmethod
     def _haversine_m(lat1, lon1, lat2, lon2):
-        """حساب المسافة بالمتر بين نقطتين جغرافيتين."""
+        """المسافة بالمتر بين نقطتين."""
         from math import radians, sin, cos, asin, sqrt
         R = 6371000.0
         dlat = radians(lat2 - lat1)
         dlon = radians(lon2 - lon1)
-        a = sin(dlat / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon / 2) ** 2
+        a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon/2)**2
         c = 2 * asin(sqrt(a))
         return R * c
 
@@ -383,7 +378,7 @@ class AttendanceCheckSerializer(serializers.Serializer):
 
     @staticmethod
     def _anchor_times(now_local, start_t, end_t, anchor_date=None):
-        """يرجع (start_dt, end_dt) مع دعم الوردية الليلية وربط التاريخ الصحيح."""
+        """إرجاع (start_dt, end_dt) مع دعم الوردية الليلية."""
         if anchor_date is None:
             base = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
         else:
@@ -392,55 +387,38 @@ class AttendanceCheckSerializer(serializers.Serializer):
         start_dt = base.replace(hour=start_t.hour, minute=start_t.minute)
         end_dt   = base.replace(hour=end_t.hour,   minute=end_t.minute)
         if end_t <= start_t:
-            end_dt += timedelta(days=1)  # تمتد لليوم التالي
+            end_dt += timedelta(days=1)
         return start_dt, end_dt
 
-    @staticmethod
-    def _in_window(now, start, end):
-        """يتحقق من الانتماء للنافذة مع دعم عبور منتصف الليل."""
-        if start is None and end is None:
-            return True
-        if start and end:
-            if end <= start:
-                # وردية ليلية: عدّل now/end ليوم تالي عند الحاجة
-                if now < start:
-                    now = now + timedelta(days=1)
-                end = end + timedelta(days=1)
-            return start <= now <= end
-        if start and not end:
-            return now >= start
-        if end and not start:
-            return now <= end
-        return False
-
-    # ===== التحقق الرئيسي =====
+    # ===== التحقق =====
     def validate(self, attrs):
-        req = self.context["request"]
-        user = req.user
+        request = self.context["request"]
+        user = request.user
 
         # الموظف
         try:
             employee = Employee.objects.get(user=user)
         except Employee.DoesNotExist:
-            raise serializers.ValidationError({"detail": "لا يوجد ملف موظف مرتبط بهذا الحساب."})
+            raise serializers.ValidationError("لا يوجد ملف موظف مرتبط بهذا الحساب.")
 
-        # الموقع (UUID أساسي — ولو عندك حقل id رقمي احتياطيًا أضف try آخر)
+        # الموقع: ندعم pk/uuid
         try:
             location = Location.objects.get(id=attrs["location_id"])
         except Location.DoesNotExist:
             try:
                 location = Location.objects.get(uuid=attrs["location_id"])
             except Location.DoesNotExist:
-                raise serializers.ValidationError({"detail": "الموقع غير موجود."})
+                raise serializers.ValidationError("الموقع غير موجود.")
 
         lat, lng = attrs["lat"], attrs["lng"]
         acc = attrs.get("accuracy", 9999.0)
         action = (attrs.get("action") or "").strip().lower()
 
-        # سياسة الدقة (اختياري)
+        # سياسة الدقة (اختياري): لا تتجاوز نصف القطر إن كان محددًا
         if getattr(location, "gps_radius", None):
             try:
                 if acc > float(location.gps_radius):
+                    # لا نرفع 400، نمنع مهذباً
                     attrs.update({
                         "employee": employee,
                         "location_obj": location,
@@ -451,14 +429,15 @@ class AttendanceCheckSerializer(serializers.Serializer):
             except (TypeError, ValueError):
                 pass
 
-        # مضلع
+        # فحص polygon إن مُفعّل
         inside_polygon = None
         if getattr(location, "use_polygon", False) and getattr(location, "polygon_coords", None):
             try:
-                poly = location.polygon_coords
+                poly = location.polygon_coords  # إمّا list أو JSON تم تحويله مسبقًا في الموديل
                 polygon = [(float(p[0]), float(p[1])) for p in poly]
                 inside_polygon = self._point_in_polygon((lat, lng), polygon)
             except Exception:
+                # نعتبره منع مهذّب بدلاً من 400
                 attrs.update({
                     "employee": employee,
                     "location_obj": location,
@@ -475,7 +454,7 @@ class AttendanceCheckSerializer(serializers.Serializer):
                 })
                 return attrs
 
-        # نصف القطر
+        # إن لم يُستخدم المضلع نطبّق نصف القطر
         if not (getattr(location, "use_polygon", False) and inside_polygon):
             if not getattr(location, "gps_coordinates", None):
                 attrs.update({
@@ -510,14 +489,14 @@ class AttendanceCheckSerializer(serializers.Serializer):
                 })
                 return attrs
 
-        # ===== نافذة الوردية =====
+        # ===== حساب نافذة الوردية/السماحات =====
         now_aware = dj_timezone.now()
         now_local = dj_timezone.localtime(now_aware)
 
         current_shift = None
         allowed_start = allowed_end = None  # لعرضها في الرد
 
-        # تعيينات الموظف الفعّالة
+        # نبحث في تعيينات الموظف الفعالة
         assign_qs = (EmployeeShiftAssignment.objects
                      .select_related("shift", "location")
                      .filter(employee=employee, active=True)
@@ -533,7 +512,7 @@ class AttendanceCheckSerializer(serializers.Serializer):
             if not (start_t and end_t):
                 continue
 
-            # لو التعيين مرتبط بموقع محدد:
+            # إن كان التعيين مرتبطًا بموقع محدد، تأكد التطابق
             if getattr(a, "location_id", None) and a.location_id != location.id:
                 continue
 
@@ -543,16 +522,18 @@ class AttendanceCheckSerializer(serializers.Serializer):
                 a.checkout_grace_hours is None
             )
 
-            # ربط التاريخ للوردية الليلية
-            anchor_date = getattr(a, "date", None)
-            if end_t <= start_t:
-                now_time = now_local.time()
-                if now_time <= end_t:
-                    anchor_date = (now_local - timedelta(days=1)).date()
-                else:
-                    anchor_date = now_local.date()
+            anchor = getattr(a, "date", None) or None
+            # حدد بداية ونهاية الوردية وفق التاريخ المعتمد
+            start_dt, end_dt = self._anchor_times(now_local, start_t, end_t, anchor_date=anchor)
 
-            start_dt, end_dt = self._anchor_times(now_local, start_t, end_t, anchor_date=anchor_date)
+            # تجاهل التعيينات التي لا تغطي الوقت الحالي (خاصة الوردية الليلية)
+            # إذا كان الآن خارج نطاق start_dt..end_dt نهمل هذه الوردية وننتقل لغيرها
+            try:
+                if not (start_dt <= now_local <= end_dt):
+                    continue
+            except Exception:
+                # في حال أي خطأ نتجاوز
+                continue
 
             ok = False
             win_l = win_r = None
@@ -563,12 +544,14 @@ class AttendanceCheckSerializer(serializers.Serializer):
                 win_r = None
             else:
                 if action == "check_in":
+                    # مسموح فقط من بداية الوردية حتى بداية + checkin_grace
                     grace_min = int(a.checkin_grace or 0)
                     win_l = start_dt
                     win_r = start_dt + timedelta(minutes=grace_min)
-                    ok = self._in_window(now_local, win_l, win_r)
+                    ok = (win_l <= now_local <= win_r)
 
                 elif action == "check_out":
+                    # انصراف فقط بعد (بداية + checkout_grace[_hours])
                     if a.checkout_grace_hours is not None:
                         threshold_min = int(round(float(a.checkout_grace_hours) * 60))
                     elif a.checkout_grace is not None:
@@ -579,16 +562,17 @@ class AttendanceCheckSerializer(serializers.Serializer):
                     win_l, win_r = earliest, None
                     ok = (now_local >= earliest)
 
-                else:  # early_check_out
+                else:  # early_check_out: لا شرط وقت
                     ok = True
                     win_l, win_r = None, None
 
             if not ok:
-                # منع مهذّب (بدون non_field_errors)
+                # منع مهذّب برسالة واضحة (بدون raise)
                 if action == "check_in":
-                    end_txt = (start_dt + timedelta(minutes=int(a.checkin_grace or 0))).strftime('%H:%M')
-                    reason = f"⚠️ لا يمكن تسجيل الحضور الآن. فترة السماح للحضور انتهت عند {end_txt}."
-                else:  # check_out
+                    reason = (f"⚠️ لا يمكن تسجيل الحضور الآن. "
+                              f"فترة السماح للحضور انتهت عند { (start_dt + timedelta(minutes=int(a.checkin_grace or 0))).strftime('%H:%M') }.")
+                else:
+                    # check_out
                     if a.checkout_grace_hours is not None:
                         reason = f"⚠️ لا يمكن تسجيل الانصراف قبل مرور {a.checkout_grace_hours} ساعة من بداية الوردية."
                     elif a.checkout_grace is not None:
@@ -606,11 +590,12 @@ class AttendanceCheckSerializer(serializers.Serializer):
                 })
                 return attrs
 
-            # تم المطابقة
+            # تطابق: نعتمد هذه الوردية
             current_shift, allowed_start, allowed_end = sh, win_l, win_r
             break
 
         if current_shift is None:
+            # خارج أية وردية — منـع مهذّب
             attrs.update({
                 "employee": employee,
                 "location_obj": location,
@@ -627,8 +612,8 @@ class AttendanceCheckSerializer(serializers.Serializer):
             "employee": employee,
             "location_obj": location,
             "current_shift": current_shift,
-            "shift_window_start": allowed_start,
-            "shift_window_end": allowed_end,
+            "shift_window_start": allowed_start,   # قد تكون None لو غير مقيّدة
+            "shift_window_end": allowed_end,       # قد تكون None
             "blocked": False,
             "blocked_reason": None,
             "now_local": now_local,
@@ -636,7 +621,7 @@ class AttendanceCheckSerializer(serializers.Serializer):
         return attrs
 
     def create(self, validated):
-        """إنشاء سجل الحضور عند check_in (الانصراف يتم في الـ View)."""
+        """إنشاء سجل الحضور عند check_in، التحديث للانصراف يتم في الـ View."""
         if validated["action"] == "check_in":
             rec = AttendanceRecord.objects.create(
                 employee=validated["employee"],
@@ -649,7 +634,7 @@ class AttendanceCheckSerializer(serializers.Serializer):
             )
             return rec
         return None
-    
+
 class ResolveLocationSerializer(serializers.Serializer):
     lat = serializers.FloatField()
     lng = serializers.FloatField()

@@ -158,138 +158,100 @@ class GuardMeView(APIView):
 
         return Response(EmployeeMeSerializer(emp).data, status=status.HTTP_200_OK)
     
- 
 
+    
 
 class AttendanceCheckAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
-    # تحويل التاريخ لـ ISO محلي (حتى لا تختلط أيام الوردية الليلية على الواجهة)
-    @staticmethod
-    def _iso_minutes(dt):
-        if dt is None:
-            return None
-        try:
-            return dj_timezone.localtime(dt).isoformat(timespec="minutes")
-        except Exception:
-            return str(dt)
-
-    @classmethod
-    def _window(cls, start, end, now):
-        return {
-            "from": cls._iso_minutes(start),
-            "to": cls._iso_minutes(end),
-            "now": cls._iso_minutes(now),
-        }
-
-    def _deny(self, *, action, detail, reason_code,
-              start=None, end=None, now=None, extra=None):
+    def _deny(self, *, action, detail, reason_code, start=None, end=None, now=None, extra=None):
         payload = {
             "ok": False,
-            "performed": False,    # لم تُنفّذ العملية
+            "performed": False,      # لم تُنفّذ العملية
             "action": action,
-            "detail": detail,      # نص واضح بالعربي
+            "detail": detail,        # نص مهذّب للمستخدم
             "reason_code": reason_code,
         }
-        if any(v is not None for v in (start, end, now)):
-            payload["window"] = self._window(start, end, now)
-        if extra:
-            payload.update(extra)
-        # نرجع 200 حتى لا يظهر 400 في التطبيق
+        wnd = {}
+        if start is not None: wnd["from"] = start
+        if end   is not None: wnd["to"]   = end
+        if now   is not None: wnd["now"]  = now
+        if wnd: payload["window"] = wnd
+        if extra: payload.update(extra)
+        # نرجع 200 حتى لا يظهر "HTTP 400" في التطبيق
         return Response(payload, status=status.HTTP_200_OK)
 
-    @transaction.atomic
     def post(self, request):
         ser = AttendanceCheckSerializer(data=request.data, context={"request": request})
         if not ser.is_valid():
-            # أخطاء إدخال (قيم ناقصة/غير صحيحة) — نعيد 200 برسالة لطيفة
+            # أخطاء إدخال (حقول ناقصة/قيمة غير صالحة) — نعيد 200 برسالة لطيفة أيضاً
             return Response({
-                "ok": False,
-                "performed": False,
+                "ok": False, "performed": False,
                 "action": request.data.get("action"),
-                "detail": "تعذّر معالجة الطلب. الرجاء التحقق من الحقول المدخلة.",
+                "detail": "تعذر معالجة الطلب. الرجاء التحقق من الحقول المدخلة.",
                 "errors": ser.errors
             }, status=status.HTTP_200_OK)
 
-        v         = ser.validated_data
-        action    = v["action"]
-        employee  = v["employee"]
-        location  = v["location_obj"]
-        lat       = v["lat"]
-        lng       = v["lng"]
-        acc       = v.get("accuracy")
-        dist      = v.get("distance_m")
+        action   = ser.validated_data["action"]
+        employee = ser.validated_data["employee"]
+        location = ser.validated_data["location_obj"]
+        lat      = ser.validated_data["lat"]
+        lng      = ser.validated_data["lng"]
+        acc      = ser.validated_data.get("accuracy")
+        dist     = ser.validated_data.get("distance_m")
 
         now       = dj_timezone.now()
         now_local = dj_timezone.localtime(now)
 
-        start_dt  = v.get("shift_window_start")
-        end_dt    = v.get("shift_window_end")
-        blocked   = v.get("blocked")
-        reason    = v.get("blocked_reason")
+        start_dt = ser.validated_data.get("shift_window_start")
+        end_dt   = ser.validated_data.get("shift_window_end")
+        blocked  = ser.validated_data.get("blocked")
+        reason   = ser.validated_data.get("blocked_reason")
 
-        # المنع المهذّب القادم من الـ Serializer (خارج النطاق/النافذة/دقة ضعيفة/خارج وردية…)
+        # لو الـ serializer قرر المنع، نرجع رسالة فقط بدون تنفيذ
         if blocked:
             return self._deny(
                 action=action,
                 detail=reason or "⚠️ لا يمكن تنفيذ العملية في الوقت الحالي.",
                 reason_code="business_rule_violation",
-                start=start_dt, end=end_dt, now=now_local,
-                extra={
-                    "location_id": str(getattr(location, "id", "")),
-                    "location_name": getattr(location, "name", ""),
-                    "client_name": getattr(location.client, "name", "") if getattr(location, "client", None) else "",
-                }
+                start=start_dt, end=end_dt, now=now_local
             )
 
-        # ===== تنفيذ الإجراءات =====
-
-        # 1) تسجيل حضور
+        # ===== تنفيذ العمليات =====
         if action == "check_in":
-            # (اختياري) إغلاق أي سجل مفتوح تلقائيًا حتى لا تتكرر السجلات
+            # إذا كان هناك سجل حضور مفتوح مسبقًا فلا يُسمح بتسجيل حضور جديد
             open_rec = (AttendanceRecord.objects
                         .filter(employee=employee, check_out_time__isnull=True)
                         .order_by("-check_in_time").first())
             if open_rec:
-                open_rec.check_out_time = now
-                open_rec.notes = (open_rec.notes or "") + f" | auto-out lat={lat}, lng={lng}, acc={acc}, dist={dist}"
-                open_rec.location = open_rec.location or location
-                open_rec.save(update_fields=["check_out_time", "notes", "location"])
+                return self._deny(
+                    action=action,
+                    detail="⚠️ تم تسجيل حضور مسبقًا، لا يمكن تسجيل حضور آخر قبل الانصراف.",
+                    reason_code="already_checked_in",
+                    start=start_dt, end=end_dt, now=now_local
+                )
 
-            rec = ser.create(v)  # ينشئ سجل الحضور
+            rec = ser.save()  # إنشاء سجل الحضور
             return Response({
                 "ok": True,
                 "performed": True,
                 "action": action,
                 "detail": "✅ تم تسجيل حضورك بنجاح.",
-                "note": (
-                    "الوردية غير مقيّدة زمنيًا."
-                    if (start_dt is None and end_dt is None)
-                    else (
-                        f"الفترة المسموحة للحضور: "
-                        f"{dj_timezone.localtime(start_dt).strftime('%H:%M')} → "
-                        f"{dj_timezone.localtime(end_dt).strftime('%H:%M')}"
-                        if (start_dt and end_dt) else ""
-                    )
-                ),
-                "record_id": str(rec.id) if rec else None,
+                "note": ("الوردية غير مقيّدة زمنيًا."
+                         if start_dt is None and end_dt is None
+                         else (f"الفترة المسموحة للحضور: {start_dt.strftime('%H:%M')} → {end_dt.strftime('%H:%M')}" if start_dt and end_dt else "")),
+                "record_id": str(rec.id),
                 "employee": getattr(employee, "full_name", str(employee.pk)),
-                "location": getattr(location, "name", str(location.pk)),
-                "window": self._window(start_dt, end_dt, now),
+                "location_id": str(location.id) if getattr(location, "id", None) else None,
+                "location_name": getattr(location, "name", None),
             }, status=status.HTTP_201_CREATED)
 
-        # 2) تسجيل انصراف
-        if action == "check_out":
+        elif action == "check_out":
             rec = (AttendanceRecord.objects
                    .filter(employee=employee, check_out_time__isnull=True)
                    .order_by("-check_in_time").first())
             if not rec:
-                return self._deny(
-                    action=action,
-                    detail="لا يوجد سجل حضور مفتوح لإقفاله.",
-                    reason_code="no_open_record",
-                    start=start_dt, end=end_dt, now=now_local
-                )
+                return self._deny(action=action, detail="لا يوجد سجل حضور مفتوح لإقفاله.", reason_code="no_open_record")
 
             rec.check_out_time = now
             rec.notes = (rec.notes or "") + f" | out lat={lat}, lng={lng}, acc={acc}, dist={dist}"
@@ -301,51 +263,32 @@ class AttendanceCheckAPIView(APIView):
                 "performed": True,
                 "action": action,
                 "detail": "✅ تم تسجيل انصرافك بنجاح.",
-                "note": (
-                    "الوردية غير مقيّدة زمنيًا."
-                    if (start_dt is None and end_dt is None)
-                    else (f"يمكن الانصراف اعتبارًا من: {dj_timezone.localtime(start_dt).strftime('%H:%M')}" if start_dt else "")
-                ),
+                "note": ("الوردية غير مقيّدة زمنيًا."
+                         if (start_dt is None and end_dt is None)
+                         else (f"يمكن الانصراف اعتبارًا من: {start_dt.strftime('%H:%M')}" if start_dt else "")),
                 "record_id": str(rec.id),
                 "employee": getattr(employee, "full_name", str(employee.pk)),
-                "location": getattr(rec.location, "name", None) if rec.location else None,
-                "window": self._window(start_dt, end_dt, now),
+                "location_id": str(rec.location.id) if rec.location else None,
+                "location_name": getattr(rec.location, "name", None) if rec.location else None,
             }, status=status.HTTP_200_OK)
 
-        # 3) انصراف مبكر
-        if action == "early_check_out":
+        elif action == "early_check_out":
             reason_txt = (request.data.get("early_reason") or "").strip()
-            file_obj   = request.FILES.get("early_attachment")
+            file_obj = request.FILES.get("early_attachment")
             if not reason_txt:
-                return self._deny(
-                    action=action,
-                    detail="يجب كتابة سبب الانصراف المبكر.",
-                    reason_code="early_checkout_reason_required",
-                    start=start_dt, end=end_dt, now=now_local
-                )
+                return self._deny(action=action, detail="يجب كتابة سبب الانصراف المبكر.", reason_code="early_checkout_reason_required")
 
             rec = (AttendanceRecord.objects
                    .filter(employee=employee, check_out_time__isnull=True)
                    .order_by("-check_in_time").first())
             if not rec:
-                return self._deny(
-                    action=action,
-                    detail="لا يوجد سجل حضور مفتوح لإقفاله.",
-                    reason_code="no_open_record",
-                    start=start_dt, end=end_dt, now=now_local
-                )
+                return self._deny(action=action, detail="لا يوجد سجل حضور مفتوح لإقفاله.", reason_code="no_open_record")
 
             rec.check_out_time = now
-            # حقول اختيارية حسب نموذجك:
-            if hasattr(rec, "early_checkout"):
-                rec.early_checkout = True
-            if hasattr(rec, "early_reason"):
-                rec.early_reason = reason_txt
-            else:
-                rec.notes = (rec.notes or "") + f" | early_reason={reason_txt}"
-            if file_obj and hasattr(rec, "early_attachment"):
+            rec.early_checkout = True
+            rec.early_reason   = reason_txt
+            if file_obj:
                 rec.early_attachment = file_obj
-
             rec.notes = (rec.notes or "") + f" | early-out lat={lat}, lng={lng}, acc={acc}, dist={dist}"
             rec.location = rec.location or location
             rec.save()
@@ -358,16 +301,14 @@ class AttendanceCheckAPIView(APIView):
                 "early_checkout": True,
                 "early_reason": reason_txt,
                 "record_id": str(rec.id),
-                "window": self._window(start_dt, end_dt, now),
+                "employee": getattr(employee, "full_name", str(employee.pk)),
+                "location_id": str(rec.location.id) if rec.location else None,
+                "location_name": getattr(rec.location, "name", None) if rec.location else None,
             }, status=status.HTTP_200_OK)
 
         # إجراء غير مدعوم
-        return self._deny(
-            action=action,
-            detail="إجراء غير مدعوم.",
-            reason_code="unsupported_action",
-            start=start_dt, end=end_dt, now=now_local
-        )
+        return self._deny(action=action, detail="إجراء غير مدعوم.", reason_code="unsupported_action")
+
 class ResolveLocationAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
