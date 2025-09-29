@@ -247,7 +247,7 @@ class EmployeeMeSerializer(serializers.ModelSerializer):
             "locations", "salary",
             "tasks", "shifts",
             'shift_assignments',
-            'early_check_out', 'early_reason', 'early_attachment',
+            # 'early_check_out', 'early_reason', 'early_attachment',
         ]
 
     def get_role_label(self, obj):
