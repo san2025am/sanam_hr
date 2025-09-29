@@ -201,6 +201,7 @@ class AttendanceCheckAPIView(APIView):
         acc      = ser.validated_data.get("accuracy")
         dist     = ser.validated_data.get("distance_m")
 
+        # الوقت الحالي للتطبيق: نحفظ كل من التوقيت العام والتوقيت المحلي
         now       = dj_timezone.now()
         now_local = dj_timezone.localtime(now)
 
@@ -291,7 +292,8 @@ class AttendanceCheckAPIView(APIView):
             if not rec:
                 return self._deny(action=action, detail="لا يوجد سجل حضور مفتوح لإقفاله.", reason_code="no_open_record")
 
-            rec.check_out_time = now
+            # نحفظ وقت الانصراف بالتوقيت المحلي لضمان توافقه مع عرض الواجهة
+            rec.check_out_time = now_local
             rec.notes = (rec.notes or "") + f" | out lat={lat}, lng={lng}, acc={acc}, dist={dist}"
             rec.location = rec.location or location
             rec.save(update_fields=["check_out_time", "notes", "location"])
@@ -322,7 +324,8 @@ class AttendanceCheckAPIView(APIView):
             if not rec:
                 return self._deny(action=action, detail="لا يوجد سجل حضور مفتوح لإقفاله.", reason_code="no_open_record")
 
-            rec.check_out_time = now
+            # نحفظ وقت الانصراف بالتوقيت المحلي لضمان توافقه مع عرض الواجهة
+            rec.check_out_time = now_local
             rec.early_checkout = True
             rec.early_reason   = reason_txt
             if file_obj:

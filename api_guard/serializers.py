@@ -621,19 +621,32 @@ class AttendanceCheckSerializer(serializers.Serializer):
         return attrs
 
     def create(self, validated):
-        """إنشاء سجل الحضور عند check_in، التحديث للانصراف يتم في الـ View."""
-        if validated["action"] == "check_in":
-            rec = AttendanceRecord.objects.create(
-                employee=validated["employee"],
-                location=validated["location_obj"],
-                shift=validated.get("current_shift"),
-                check_in_time=dj_timezone.now(),
-                notes=(f"in lat={validated['lat']}, lng={validated['lng']}, "
-                       f"acc={validated.get('accuracy')}, "
-                       f"dist={round(validated.get('distance_m') or 0.0, 2)}"),
-            )
-            return rec
-        return None
+        """إنشاء سجل الحضور عند check_in، التحديث للانصراف يتم في الـ View.
+
+        نحفظ وقت الحضور بالتوقيت المحلي (وليس بتوقيت الخادم) لضمان تطابقه مع وقت الواجهة.
+        """
+        # لا يتم إنشاء سجل إلا في حالة check_in
+        if validated["action"] != "check_in":
+            return None
+
+        # الوقت المحلي المرسل من validate (إن وُجد) أو نحسبه الآن
+        now_local = validated.get("now_local")
+        if not now_local:
+            # نستخدم localtime لضبط التوقيت في المنطقة الزمنية الافتراضية
+            now_local = dj_timezone.localtime(dj_timezone.now())
+
+        rec = AttendanceRecord.objects.create(
+            employee=validated["employee"],
+            location=validated["location_obj"],
+            shift=validated.get("current_shift"),
+            check_in_time=now_local,
+            notes=(
+                f"in lat={validated['lat']}, lng={validated['lng']}, "
+                f"acc={validated.get('accuracy')}, "
+                f"dist={round(validated.get('distance_m') or 0.0, 2)}"
+            ),
+        )
+        return rec
 
 class ResolveLocationSerializer(serializers.Serializer):
     lat = serializers.FloatField()
