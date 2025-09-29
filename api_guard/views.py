@@ -30,6 +30,7 @@ User = get_user_model()
 
 from rest_framework import permissions, status
 from django.shortcuts import get_object_or_404
+from datetime import timedelta
 
 
 
@@ -219,6 +220,25 @@ class AttendanceCheckAPIView(APIView):
 
         # ===== تنفيذ العمليات =====
         if action == "check_in":
+            # تأكد من عدم وجود تسجيل حضور سابق في نفس اليوم (لمنع تكرار الحضور في الوردية)
+            # نحسب بداية ونهاية اليوم المحلي الحالي
+            try:
+                today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+                today_end   = today_start + timedelta(days=1)
+                existing = AttendanceRecord.objects.filter(
+                    employee=employee,
+                    check_in_time__gte=today_start,
+                    check_in_time__lt=today_end
+                ).exists()
+                if existing:
+                    return self._deny(
+                        action=action,
+                        detail="⚠️ تم تسجيل حضور مسبقًا اليوم، لا يمكن تسجيل حضور آخر في نفس الوردية.",
+                        reason_code="already_checked_in_today",
+                        start=start_dt, end=end_dt, now=now_local
+                    )
+            except Exception:
+                pass
             # إذا كان هناك سجل حضور مفتوح مسبقًا فلا يُسمح بتسجيل حضور جديد
             open_rec = (AttendanceRecord.objects
                         .filter(employee=employee, check_out_time__isnull=True)
