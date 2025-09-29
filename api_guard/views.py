@@ -239,6 +239,24 @@ class AttendanceCheckAPIView(APIView):
                     )
             except Exception:
                 pass
+
+            # تحقق من عدم وجود تسجيل حضور لنفس الوردية (نفس الشيفت) حتى لا يحدث أكثر من حضور في الوردية الواحدة
+            try:
+                current_shift = ser.validated_data.get("current_shift")
+                if current_shift is not None:
+                    exists_for_shift = AttendanceRecord.objects.filter(
+                        employee=employee,
+                        shift=current_shift
+                    ).exists()
+                    if exists_for_shift:
+                        return self._deny(
+                            action=action,
+                            detail="⚠️ تم تسجيل حضور لهذه الوردية مسبقًا، لا يمكن تسجيل حضور آخر لنفس الوردية.",
+                            reason_code="already_checked_in_shift",
+                            start=start_dt, end=end_dt, now=now_local
+                        )
+            except Exception:
+                pass
             # إذا كان هناك سجل حضور مفتوح مسبقًا فلا يُسمح بتسجيل حضور جديد
             open_rec = (AttendanceRecord.objects
                         .filter(employee=employee, check_out_time__isnull=True)
