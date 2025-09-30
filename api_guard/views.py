@@ -4,7 +4,6 @@ from datetime import timedelta
 
 from django.utils import timezone as dj_timezone
 from django.db import transaction
-from datetime import timedelta
 
 from django.contrib.auth import authenticate, get_user_model
 from rest_framework import generics, status
@@ -15,30 +14,19 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from .models import AttendanceRecord, Employee, Salary
+from .models import AttendanceRecord, Employee, Salary, Report, Request, Advance
 from .serializers import (
     GUARD_ROLE_NAMES,
     ReportSerializer,
     RequestSerializer,
+    AdvanceSerializer,
     ResolveLocationSerializer,
     AttendanceCheckSerializer,
     GuardTokenObtainPairSerializer,
     UsernameForgotSerializer,
     UsernameResetSerializer,
     EmployeeMeSerializer,
-    AttendanceCheckSerializer,
-    ResolveLocationSerializer,
 )
-
-User = get_user_model()
-
-
-# =========================
-# Auth
-# =========================
- 
-
-from .models import AttendanceRecord, Employee, Salary, Report, ReportAttachment, Request
 
 
 User = get_user_model()
@@ -407,25 +395,7 @@ class GuardReportListCreateView(generics.ListCreateAPIView):
     def perform_create(self, serializer):
         employee = _require_guard_employee(self.request.user)
         with transaction.atomic():
-            report = serializer.save(employee=employee)
-            self._save_attachments(report)
-        return report
-
-    def _save_attachments(self, report):
-        files = self.request.FILES.getlist("attachments")
-        for uploaded in files:
-            ReportAttachment.objects.create(
-                report=report,
-                file=uploaded,
-                file_type=self._detect_file_type(uploaded),
-            )
-
-    @staticmethod
-    def _detect_file_type(uploaded):
-        content_type = (getattr(uploaded, "content_type", "") or "").lower()
-        if content_type.startswith("video/"):
-            return "video"
-        return "image"
+            serializer.save(employee=employee)
 
 
 class GuardRequestListCreateView(generics.ListCreateAPIView):
@@ -443,4 +413,29 @@ class GuardRequestListCreateView(generics.ListCreateAPIView):
 
     def perform_create(self, serializer):
         employee = _require_guard_employee(self.request.user)
+        serializer.save(employee=employee)
+
+
+class GuardAdvanceListCreateView(generics.ListCreateAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = AdvanceSerializer
+
+    def get_queryset(self):
+        employee = _require_guard_employee(self.request.user)
+        return (
+            Advance.objects
+            .filter(employee=employee)
+            .order_by("-requested_at")
+        )
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        try:
+            context["employee"] = _require_guard_employee(self.request.user)
+        except Exception:
+            pass
+        return context
+
+    def perform_create(self, serializer):
+        employee = self.get_serializer_context().get("employee") or _require_guard_employee(self.request.user)
         serializer.save(employee=employee)

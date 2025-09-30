@@ -11,6 +11,7 @@ from api_guard.views import (
     GuardMeView,
     GuardReportListCreateView,
     GuardRequestListCreateView,
+    GuardAdvanceListCreateView,
     PasswordForgotUsernameView,
     PasswordResetUsernameView,
     ResolveLocationAPIView,
@@ -32,4 +33,5 @@ urlpatterns = [
     path("attendance/resolve-location/", ResolveLocationAPIView.as_view(), name="resolve-location"),
     path("guards/reports/", GuardReportListCreateView.as_view(), name="guard-reports"),
     path("guards/requests/", GuardRequestListCreateView.as_view(), name="guard-requests"),
+    path("guards/advances/", GuardAdvanceListCreateView.as_view(), name="guard-advances"),
 ]

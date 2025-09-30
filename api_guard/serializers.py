@@ -4,6 +4,7 @@ import json
 import re
 import secrets
 from datetime import timedelta
+from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.utils import timezone as dj_timezone
@@ -56,8 +57,8 @@ def _point_in_polygon(point, polygon) -> bool:
 
 from .models import (
     Role, User, Employee, Location, EmployeeLocationAssignment, Task, Shift,
-    AttendanceRecord, Salary, Report, ReportAttachment, Request,
-    ViolationRule, EmployeeViolation, Contract, Advance, Custody,
+    AttendanceRecord, Salary, Report, ReportAttachment, Request, Advance,
+    ViolationRule, EmployeeViolation, Contract, Custody,
     UniformItem, UniformDelivery, UniformDeliveryItem, PasswordResetSMS,
     EmployeeShiftAssignment,
 )
@@ -764,6 +765,13 @@ class ReportSerializer(serializers.ModelSerializer):
     report_type_display = serializers.CharField(source="get_report_type_display", read_only=True)
     status_display = serializers.CharField(source="get_status_display", read_only=True)
     attachments = ReportAttachmentSerializer(many=True, read_only=True)
+    upload_attachments = serializers.ListField(
+        child=serializers.FileField(allow_empty_file=False),
+        write_only=True,
+        required=False,
+        allow_empty=True,
+        help_text="قائمة ملفات (صور/فيديو) مرفقة مع التقرير",
+    )
 
     class Meta:
         model = Report
@@ -779,6 +787,7 @@ class ReportSerializer(serializers.ModelSerializer):
             "location",
             "location_name",
             "attachments",
+            "upload_attachments",
         ]
         read_only_fields = [
             "id",
@@ -789,6 +798,32 @@ class ReportSerializer(serializers.ModelSerializer):
             "location_name",
             "attachments",
         ]
+
+    def validate_upload_attachments(self, files):
+        allowed_prefixes = ("image/", "video/")
+        for uploaded in files or []:
+            content_type = (getattr(uploaded, "content_type", "") or "").lower()
+            if not content_type.startswith(allowed_prefixes):
+                raise serializers.ValidationError("يجب أن يكون نوع الملف صورة أو فيديو")
+        return files
+
+    def create(self, validated_data):
+        attachments = validated_data.pop("upload_attachments", [])
+        report = super().create(validated_data)
+        for uploaded in attachments:
+            ReportAttachment.objects.create(
+                report=report,
+                file=uploaded,
+                file_type=self._detect_file_type(uploaded),
+            )
+        return report
+
+    @staticmethod
+    def _detect_file_type(uploaded):
+        content_type = (getattr(uploaded, "content_type", "") or "").lower()
+        if content_type.startswith("video/"):
+            return "video"
+        return "image"
 
 
 class RequestSerializer(serializers.ModelSerializer):
@@ -803,6 +838,10 @@ class RequestSerializer(serializers.ModelSerializer):
             "request_type",
             "request_type_display",
             "description",
+            "leave_start",
+            "leave_end",
+            "leave_hours",
+            "leave_deducted",
             "status",
             "status_display",
             "approval_notes",
@@ -816,4 +855,74 @@ class RequestSerializer(serializers.ModelSerializer):
             "approval_notes",
             "approver_name",
             "created_at",
+            "leave_hours",
+            "leave_deducted",
         ]
+
+    def validate(self, attrs):
+        request_type = attrs.get("request_type") or getattr(self.instance, "request_type", None)
+        leave_start = attrs.get("leave_start", getattr(self.instance, "leave_start", None))
+        leave_end = attrs.get("leave_end", getattr(self.instance, "leave_end", None))
+
+        if request_type == 'leave':
+            if not leave_start or not leave_end:
+                raise serializers.ValidationError("يجب تحديد تاريخ ووقت البداية والنهاية للإجازة")
+            if leave_start >= leave_end:
+                raise serializers.ValidationError("تاريخ نهاية الإجازة يجب أن يكون بعد تاريخ البداية")
+        return attrs
+
+
+class AdvanceSerializer(serializers.ModelSerializer):
+    status_display = serializers.CharField(source="get_status_display", read_only=True)
+
+    class Meta:
+        model = Advance
+        fields = [
+            "id",
+            "amount",
+            "reason",
+            "status",
+            "status_display",
+            "requested_at",
+            "approved_at",
+        ]
+        read_only_fields = [
+            "id",
+            "status",
+            "status_display",
+            "requested_at",
+            "approved_at",
+        ]
+
+    def validate_amount(self, value):
+        if value <= 0:
+            raise serializers.ValidationError("قيمة السلفة يجب أن تكون أكبر من صفر")
+
+        employee = self.context.get("employee")
+        if not employee:
+            return value
+
+        salary, _ = Salary.objects.get_or_create(employee=employee)
+        base_salary = salary.base_salary or Decimal('0')
+        if base_salary <= 0:
+            raise serializers.ValidationError("لم يتم تحديد الراتب الأساسي بعد")
+
+        max_allowed = (base_salary * Decimal('0.20')).quantize(Decimal('0.01'))
+        if value - max_allowed > Decimal('0.0001'):
+            raise serializers.ValidationError(f"قيمة السلفة لا يمكن أن تتجاوز {max_allowed} (20% من الراتب)")
+        return value
+
+    def validate(self, attrs):
+        employee = self.context.get("employee")
+        if not employee:
+            return attrs
+
+        hire_date = employee.hire_date
+        if not hire_date:
+            raise serializers.ValidationError("يجب تسجيل تاريخ التعيين قبل طلب السلفة")
+
+        days_worked = (dj_timezone.now().date() - hire_date).days
+        if days_worked < 30:
+            raise serializers.ValidationError("يجب إكمال شهر عمل كامل قبل طلب السلفة")
+
+        return attrs
