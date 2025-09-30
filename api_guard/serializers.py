@@ -1,41 +1,74 @@
-from rest_framework import serializers
-from django.contrib.auth import get_user_model
-from datetime import timedelta
-import re, secrets
+from __future__ import annotations
 
-from .utils.geo import haversine_m, point_in_polygon
+import json
+import re
+import secrets
+from datetime import timedelta
+
+from django.contrib.auth import get_user_model
+from django.utils import timezone as dj_timezone
+from django.db.models import Q
+
+from rest_framework import serializers
+from rest_framework.exceptions import AuthenticationFailed
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+
+# ========================
+# محاولات لاستخدام أدوات هندسية جاهزة؛ مع بدائل داخلية
+# ========================
+try:
+    from .utils.geo import haversine_m as _hv, point_in_polygon as _pip
+except Exception:
+    _hv = None
+    _pip = None
+
+def _haversine_m(lat1, lon1, lat2, lon2) -> float:
+    if _hv:
+        return _hv(lat1, lon1, lat2, lon2)
+    # fallback بسيط
+    from math import radians, sin, cos, asin, sqrt
+    R = 6371000.0
+    dlat = radians(lat2 - lat1)
+    dlon = radians(lon2 - lon1)
+    a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon/2)**2
+    c = 2 * asin(sqrt(a))
+    return R * c
+
+def _point_in_polygon(point, polygon) -> bool:
+    if _pip:
+        return _pip(point, polygon)
+    # fallback (ray casting)
+    x, y = point
+    inside = False
+    n = len(polygon)
+    if n < 3:
+        return False
+    p1x, p1y = polygon[0]
+    for i in range(1, n + 1):
+        p2x, p2y = polygon[i % n]
+        if min(p1y, p2y) < y <= max(p1y, p2y) and x <= max(p1x, p2x):
+            xinters = (y - p1y) * (p2x - p1x) / (p2y - p1y + 1e-12) + p1x
+            if p1x == p2x or x <= xinters:
+                inside = not inside
+        p1x, p1y = p2x, p2y
+    return inside
+
 
 from .models import (
-    EmployeeShiftAssignment, Role, User, Employee, Location, EmployeeLocationAssignment, Task, Shift,
+    Role, User, Employee, Location, EmployeeLocationAssignment, Task, Shift,
     AttendanceRecord, Salary, Report, ReportAttachment, Request,
     ViolationRule, EmployeeViolation, Contract, Advance, Custody,
-    UniformItem, UniformDelivery, UniformDeliveryItem, PasswordResetSMS
+    UniformItem, UniformDelivery, UniformDeliveryItem, PasswordResetSMS,
+    EmployeeShiftAssignment,
 )
-from datetime import timedelta
-from django.utils import timezone as dj_timezone
-
-# إن كان لديك جدول تعيينات للوردية:
-try:
-    from .models import EmployeeShiftAssignment
-    HAS_ASSIGN = True
-except Exception:
-    HAS_ASSIGN = False
-
-
-from django.db.models import Q
-# ...
-
-
 
 User = get_user_model()
 
 # =========================
 # Auth / Guard login
 # =========================
-from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from rest_framework.exceptions import AuthenticationFailed
 
-GUARD_ROLE_NAMES = {"حارس أمن", "حارس الامن", "Security Guard", "Guard"}
+GUARD_ROLE_NAMES = {"حارس أمن", "حارس الامن", "Security Guard", "Guard", "guard"}
 
 class GuardTokenObtainPairSerializer(TokenObtainPairSerializer):
     """JWT فقط إذا كان الدور حارس أمن"""
@@ -44,7 +77,10 @@ class GuardTokenObtainPairSerializer(TokenObtainPairSerializer):
         user = self.user
         role_name = (user.role.name if getattr(user, "role", None) else "").strip()
         if role_name.casefold() not in {n.casefold() for n in GUARD_ROLE_NAMES}:
-            raise AuthenticationFailed("الحساب ليس له دور حارس أمن، لا يمكن تسجيل الدخول من تطبيق الحارس.", code="not_guard")
+            raise AuthenticationFailed(
+                "الحساب ليس له دور حارس أمن، لا يمكن تسجيل الدخول من تطبيق الحارس.",
+                code="not_guard"
+            )
         data.update({"user": {"id": user.id, "username": user.username, "role": role_name}})
         return data
 
@@ -68,12 +104,12 @@ class UsernameForgotSerializer(serializers.Serializer):
         try:
             user = User.objects.select_related("role").get(username__iexact=uname)
         except User.DoesNotExist:
-            raise serializers.ValidationError("لا يوجد مستخدم بهذا الاسم")
+            raise serializers.ValidationError({"username": "لا يوجد مستخدم بهذا الاسم"})
 
         if not user.is_active:
-            raise serializers.ValidationError("الحساب غير مُفعل")
+            raise serializers.ValidationError({"detail": "الحساب غير مُفعل"})
         if not (user.email and user.email.strip()):
-            raise serializers.ValidationError("لا يوجد بريد إلكتروني مرتبط بهذا الحساب")
+            raise serializers.ValidationError({"detail": "لا يوجد بريد إلكتروني مرتبط بهذا الحساب"})
 
         code = f"{secrets.randbelow(1_000_000):06d}"
         phone_val = getattr(getattr(user, "employee", None), "phone_number", "") or ""
@@ -84,20 +120,18 @@ class UsernameForgotSerializer(serializers.Serializer):
             expires_at=dj_timezone.now() + timedelta(minutes=10),
         )
 
-        # إرسال عبر الإيميل
         subject = "رمز استعادة كلمة المرور - سنام الأمن"
         body = f"رمز استعادة كلمة المرور الخاص بك هو: {code}\nصالح لمدة 10 دقائق.\n"
         try:
             from .emailer import send_email_otp
             send_email_otp(user.email, subject, body)
         except Exception:
-            # في وضع التطوير قد ترغب في إعادة الكود
             from django.conf import settings
             if getattr(settings, "DEBUG_SMS_ECHO", False):
                 attrs["session_id"] = rec.id
                 attrs["_debug_code"] = code
                 return attrs
-            raise serializers.ValidationError("تعذر إرسال البريد الإلكتروني، حاول لاحقًا")
+            raise serializers.ValidationError({"detail": "تعذر إرسال البريد الإلكتروني، حاول لاحقًا"})
 
         attrs["session_id"] = rec.id
         return attrs
@@ -113,18 +147,18 @@ class UsernameResetSerializer(serializers.Serializer):
         try:
             rec = PasswordResetSMS.objects.select_related("user").get(id=sid, is_used=False)
         except PasswordResetSMS.DoesNotExist:
-            raise serializers.ValidationError("الجلسة غير صالحة")
+            raise serializers.ValidationError({"detail": "الجلسة غير صالحة"})
 
-        if rec.expires_at and rec.expires_at < timezone.now():
-            raise serializers.ValidationError("انتهت صلاحية الرمز")
+        if rec.expires_at and rec.expires_at < dj_timezone.now():
+            raise serializers.ValidationError({"detail": "انتهت صلاحية الرمز"})
         if rec.attempts >= 5:
-            raise serializers.ValidationError("تجاوزت عدد المحاولات")
+            raise serializers.ValidationError({"detail": "تجاوزت عدد المحاولات"})
 
         rec.attempts += 1
         rec.save(update_fields=["attempts"])
 
         if rec.code_hash != _hash_code(code):
-            raise serializers.ValidationError("رمز غير صحيح")
+            raise serializers.ValidationError({"code": "رمز غير صحيح"})
 
         attrs["record"] = rec
         return attrs
@@ -144,28 +178,19 @@ class UsernameResetSerializer(serializers.Serializer):
 
 class TaskMiniSerializer(serializers.ModelSerializer):
     location_name = serializers.CharField(source="location.name", read_only=True)
-
     class Meta:
         model = Task
         fields = ["id", "title", "description", "status", "due_date", "location_name"]
 
-
-# --- Shift assignment (mini) ---
 class ShiftAssignmentMiniSerializer(serializers.ModelSerializer):
     shift_name    = serializers.CharField(source="shift.name", read_only=True)
     location_name = serializers.CharField(source="location.name", read_only=True)
-
-    # نعيد وقت البداية/النهاية الفعلي (من التعيين أو من الوردية)
     start_time = serializers.SerializerMethodField()
     end_time   = serializers.SerializerMethodField()
-
-    # جديد: حقول السماح نفسها
-    checkin_grace          = serializers.IntegerField(read_only=True)
-    checkout_grace         = serializers.IntegerField(read_only=True)
-    checkout_grace_hours   = serializers.DecimalField(max_digits=4, decimal_places=2, read_only=True)
-
-    # جديد: دلالة جاهزة للواجهة
-    unrestricted = serializers.SerializerMethodField()
+    checkin_grace        = serializers.IntegerField(read_only=True)
+    checkout_grace       = serializers.IntegerField(read_only=True)
+    checkout_grace_hours = serializers.DecimalField(max_digits=4, decimal_places=2, read_only=True)
+    unrestricted         = serializers.SerializerMethodField()
 
     class Meta:
         model = EmployeeShiftAssignment
@@ -189,23 +214,19 @@ class ShiftAssignmentMiniSerializer(serializers.ModelSerializer):
 
 class LocationMiniSerializer(serializers.ModelSerializer):
     instructions = serializers.CharField(source="instructions", allow_null=True, required=False)
-
     class Meta:
         model = Location
-        fields = ["id", "name", "client_name","instructions"]
+        fields = ["id", "name", "client_name", "instructions"]
 
 class SalaryMiniSerializer(serializers.ModelSerializer):
-    # تحويل الأرقام إلى نصوص لتفادي أخطاء النوع في Flutter
     base_salary  = serializers.SerializerMethodField()
     bonuses      = serializers.SerializerMethodField()
     overtime     = serializers.SerializerMethodField()
     deductions   = serializers.SerializerMethodField()
     total_salary = serializers.SerializerMethodField()
-
     class Meta:
         model  = Salary
         fields = ["base_salary", "bonuses", "overtime", "deductions", "total_salary", "pay_date"]
-
     def _as_str(self, v): return None if v is None else str(v)
     def get_base_salary (self, o): return self._as_str(getattr(o, "base_salary",  None))
     def get_bonuses     (self, o): return self._as_str(getattr(o, "bonuses",      None))
@@ -221,10 +242,9 @@ class EmployeeMeSerializer(serializers.ModelSerializer):
     locations  = serializers.SerializerMethodField()
     salary     = serializers.SerializerMethodField()
 
-    # الحقول الجديدة
-    id_expiry_date         = serializers.DateField(read_only=True, allow_null=True)
+    id_expiry_date          = serializers.DateField(read_only=True, allow_null=True)
     date_of_birth_gregorian = serializers.DateField(read_only=True, allow_null=True)
-    employee_instructions   = serializers.CharField( source="instructions", read_only=True, allow_blank=True, allow_null=True)
+    employee_instructions   = serializers.CharField(source="instructions", read_only=True, allow_blank=True, allow_null=True)
     location_instructions   = serializers.SerializerMethodField()
     supervisor_name         = serializers.SerializerMethodField()
     supervisor_phone        = serializers.SerializerMethodField()
@@ -232,30 +252,29 @@ class EmployeeMeSerializer(serializers.ModelSerializer):
     tasks  = serializers.SerializerMethodField()
     shifts = serializers.SerializerMethodField()
     shift_assignments = serializers.SerializerMethodField()
-    def get_shift_assignments(self, obj):
-        qs = obj.shift_assignments.select_related("shift","location").filter(active=True)
-        return ShiftAssignmentMiniSerializer(qs, many=True).data
+
     class Meta:
         model  = Employee
         fields = [
             "id", "username", "email", "role", "role_label",
             "full_name", "national_id", "phone_number",
             "hire_date", "bank_name", "bank_account",
-            "id_expiry_date", "date_of_birth_gregorian",   # ✅ أضفنا الحقول الجديدة
+            "id_expiry_date", "date_of_birth_gregorian",
             "employee_instructions", "location_instructions",
             "supervisor_name", "supervisor_phone",
-            "locations", "salary",
-            "tasks", "shifts",
-            'shift_assignments',
+            "locations", "salary", "tasks", "shifts",
+            "shift_assignments",
         ]
+
+    def get_shift_assignments(self, obj):
+        qs = obj.shift_assignments.select_related("shift", "location").filter(active=True)
+        return ShiftAssignmentMiniSerializer(qs, many=True).data
 
     def get_role_label(self, obj):
         return str(getattr(obj.user, "role", "")) or None
 
     def get_locations(self, obj):
-        qs = (EmployeeLocationAssignment.objects
-              .select_related("location")
-              .filter(employee=obj))
+        qs = EmployeeLocationAssignment.objects.select_related("location").filter(employee=obj)
         out = []
         for a in qs:
             if a.location:
@@ -268,10 +287,7 @@ class EmployeeMeSerializer(serializers.ModelSerializer):
         return out
 
     def get_salary(self, obj):
-        last = (Salary.objects
-                .filter(employee=obj)
-                .order_by("-pay_date", "-id")
-                .first())
+        last = Salary.objects.filter(employee=obj).order_by("-pay_date", "-id").first()
         return SalaryMiniSerializer(last).data if last else {
             "base_salary": None, "bonuses": None, "overtime": None,
             "deductions": None, "total_salary": None, "pay_date": None
@@ -286,40 +302,21 @@ class EmployeeMeSerializer(serializers.ModelSerializer):
 
     def get_supervisor_phone(self, obj):
         return getattr(obj.supervisor, "phone_number", None) if obj.supervisor else None
-    
-    # ======= الجديد: المهام =======
+
     def get_tasks(self, obj):
-        # إن كنت ما زلت تستخدم Task.assigned_to (حسب وصفك)
-        tasks_qs = (Task.objects
-                    .filter(assigned_to=obj)
-                    .select_related("location")
-                    .order_by("-due_date", "-id"))
+        tasks_qs = Task.objects.filter(assigned_to=obj).select_related("location").order_by("-due_date", "-id")
         return TaskMiniSerializer(tasks_qs, many=True).data
 
-        # ملاحظة: لو لاحقًا تحوّلت إلى جدول إسناد مهام Many-to-Many،
-        # غيّر أعلاه إلى:
-        # tasks_qs = (EmployeeTaskAssignment.objects
-        #             .filter(employee=obj)
-        #             .select_related("task", "task__location")
-        #             .order_by("-task__due_date", "-task__id"))
-        # return TaskMiniSerializer([a.task for a in tasks_qs], many=True).data
-
-    # ======= الجديد: الورديات =======
     def get_shifts(self, obj):
-        qs = (
-            EmployeeShiftAssignment.objects
-            .filter(employee=obj)                           # كل الورديات (نشطة/غير نشطة)
-            .select_related("shift", "location")
-            .order_by("-date", "-id")                      # الأحدث أولًا
-        )
-
+        qs = (EmployeeShiftAssignment.objects
+              .filter(employee=obj)
+              .select_related("shift", "location")
+              .order_by("-date", "-id"))
         out = []
         for a in qs:
             sh = a.shift
-            # لو الإسناد عنده وقت مخصص خذه، وإلا خذ وقت الوردية الأصلية:
             start = getattr(a, "start_time", None) or (getattr(sh, "start_time", None) if sh else None)
             end   = getattr(a, "end_time",   None) or (getattr(sh, "end_time",   None) if sh else None)
-
             out.append({
                 "id": a.id,
                 "date": a.date.isoformat() if a.date else None,
@@ -327,29 +324,31 @@ class EmployeeMeSerializer(serializers.ModelSerializer):
                 "location_name": getattr(a.location, "name", "") or "",
                 "start_time": start.strftime("%H:%M") if start else None,
                 "end_time":   end.strftime("%H:%M")   if end   else None,
-                # حقّل الاسم بغض النظر عن تسمية الحقل في الموديل
                 "active": bool(getattr(a, "is_active", getattr(a, "active", True))),
                 "notes": a.notes or "",
             })
         return out
 
 
-
+# =========================
+# Attendance / Resolve
+# =========================
 
 
 class AttendanceCheckSerializer(serializers.Serializer):
-    location_id = serializers.UUIDField()
-    action = serializers.ChoiceField(choices=[("check_in", "check_in"),
-                                             ("check_out", "check_out"),
-                                             ("early_check_out", "early_check_out")])
+    location_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    action = serializers.ChoiceField(choices=[
+        ("check_in", "check_in"),
+        ("check_out", "check_out"),
+        ("early_check_out", "early_check_out"),
+    ])
     lat = serializers.FloatField()
     lng = serializers.FloatField()
     accuracy = serializers.FloatField(required=False, min_value=0, default=9999)
 
-    # ===== أدوات مساعدة =====
+    # ===== أدوات مساعدة هندسية =====
     @staticmethod
     def _haversine_m(lat1, lon1, lat2, lon2):
-        """المسافة بالمتر بين نقطتين."""
         from math import radians, sin, cos, asin, sqrt
         R = 6371000.0
         dlat = radians(lat2 - lat1)
@@ -360,7 +359,6 @@ class AttendanceCheckSerializer(serializers.Serializer):
 
     @staticmethod
     def _point_in_polygon(point, polygon):
-        """Ray casting: point=(lat,lng), polygon=[(lat,lng), ...]."""
         x, y = point
         inside = False
         n = len(polygon)
@@ -393,7 +391,7 @@ class AttendanceCheckSerializer(serializers.Serializer):
     # ===== التحقق =====
     def validate(self, attrs):
         request = self.context["request"]
-        user = request.user
+        user    = request.user
 
         # الموظف
         try:
@@ -401,27 +399,64 @@ class AttendanceCheckSerializer(serializers.Serializer):
         except Employee.DoesNotExist:
             raise serializers.ValidationError("لا يوجد ملف موظف مرتبط بهذا الحساب.")
 
-        # الموقع: ندعم pk/uuid
+        # الموقع
         try:
             location = Location.objects.get(id=attrs["location_id"])
         except Location.DoesNotExist:
-            try:
-                location = Location.objects.get(uuid=attrs["location_id"])
-            except Location.DoesNotExist:
-                raise serializers.ValidationError("الموقع غير موجود.")
+            raise serializers.ValidationError({"location_id": "الموقع غير موجود أو مُعرّف غير صالح."})
 
-        lat, lng = attrs["lat"], attrs["lng"]
+        lat = attrs["lat"]; lng = attrs["lng"]
         acc = attrs.get("accuracy", 9999.0)
         action = (attrs.get("action") or "").strip().lower()
 
-        # سياسة الدقة (اختياري): لا تتجاوز نصف القطر إن كان محددًا
+        # ===== فحص الهوية =====
+        today = dj_timezone.localdate()
+        if getattr(employee, "id_expiry_date", None):
+            if employee.id_expiry_date < today:
+                attrs.update({
+                    "employee": employee, "location_obj": location,
+                    "blocked": True,
+                    "blocked_reason": "⚠️ لا يمكن التسجيل: الهوية منتهية.",
+                })
+                return attrs
+
+        # ===== فحص العقد (موجود + موقّع + نشِط) =====
+        contracts_qs = Contract.objects.filter(employee=employee)
+        if not contracts_qs.exists():
+            attrs.update({
+                "employee": employee, "location_obj": location,
+                "blocked": True,
+                "blocked_reason": "⚠️ لا يمكن التسجيل: لا يوجد عقد.",
+            })
+            return attrs
+
+        if contracts_qs.filter(is_signed=False).exists():
+            attrs.update({
+                "employee": employee, "location_obj": location,
+                "blocked": True,
+                "blocked_reason": "⚠️ لا يمكن التسجيل: يوجد عقد غير موقَّع. يرجى استكمال التوقيع.",
+            })
+            return attrs
+
+        has_active_signed = contracts_qs.filter(
+            is_signed=True
+        ).filter(
+            Q(end_date__isnull=True) | Q(end_date__gte=today)
+        ).exists()
+        if not has_active_signed:
+            attrs.update({
+                "employee": employee, "location_obj": location,
+                "blocked": True,
+                "blocked_reason": "⚠️ لا يمكن التسجيل: لا يوجد عقد نشط.",
+            })
+            return attrs
+
+        # ===== فحص الموقع (دقة/مضلّع/نصف قطر) =====
         if getattr(location, "gps_radius", None):
             try:
                 if acc > float(location.gps_radius):
-                    # لا نرفع 400، نمنع مهذباً
                     attrs.update({
-                        "employee": employee,
-                        "location_obj": location,
+                        "employee": employee, "location_obj": location,
                         "blocked": True,
                         "blocked_reason": "⚠️ دقة تحديد الموقع ضعيفة. اقترب من الموقع وحاول مجددًا.",
                     })
@@ -429,49 +464,42 @@ class AttendanceCheckSerializer(serializers.Serializer):
             except (TypeError, ValueError):
                 pass
 
-        # فحص polygon إن مُفعّل
         inside_polygon = None
         if getattr(location, "use_polygon", False) and getattr(location, "polygon_coords", None):
             try:
-                poly = location.polygon_coords  # إمّا list أو JSON تم تحويله مسبقًا في الموديل
+                poly = location.polygon_coords
                 polygon = [(float(p[0]), float(p[1])) for p in poly]
                 inside_polygon = self._point_in_polygon((lat, lng), polygon)
             except Exception:
-                # نعتبره منع مهذّب بدلاً من 400
                 attrs.update({
-                    "employee": employee,
-                    "location_obj": location,
+                    "employee": employee, "location_obj": location,
                     "blocked": True,
                     "blocked_reason": "⚠️ تنسيق حدود الموقع غير صالح. راجع الإدارة.",
                 })
                 return attrs
             if not inside_polygon:
                 attrs.update({
-                    "employee": employee,
-                    "location_obj": location,
+                    "employee": employee, "location_obj": location,
                     "blocked": True,
                     "blocked_reason": "⚠️ أنت خارج حدود الموقع المحددة.",
                 })
                 return attrs
 
-        # إن لم يُستخدم المضلع نطبّق نصف القطر
         if not (getattr(location, "use_polygon", False) and inside_polygon):
             if not getattr(location, "gps_coordinates", None):
                 attrs.update({
-                    "employee": employee,
-                    "location_obj": location,
+                    "employee": employee, "location_obj": location,
                     "blocked": True,
-                    "blocked_reason": "⚠️ لم تُعرّف إحداثيات الموقع. راجع الإدارة.",
+                    "blocked_reason": "⚠️ لم تُعرّف إحداثيات الموقع.",
                 })
                 return attrs
             try:
                 loc_lat, loc_lng = [float(x.strip()) for x in location.gps_coordinates.split(",", 1)]
             except Exception:
                 attrs.update({
-                    "employee": employee,
-                    "location_obj": location,
+                    "employee": employee, "location_obj": location,
                     "blocked": True,
-                    "blocked_reason": "⚠️ تنسيق إحداثيات الموقع غير صحيح. راجع الإدارة.",
+                    "blocked_reason": "⚠️ تنسيق إحداثيات الموقع غير صحيح.",
                 })
                 return attrs
             dist = self._haversine_m(lat, lng, loc_lat, loc_lng)
@@ -482,25 +510,23 @@ class AttendanceCheckSerializer(serializers.Serializer):
                 radius = 0.0
             if radius and dist > radius:
                 attrs.update({
-                    "employee": employee,
-                    "location_obj": location,
+                    "employee": employee, "location_obj": location,
                     "blocked": True,
                     "blocked_reason": f"⚠️ خارج النطاق المسموح ({int(radius)}م). المسافة الحالية: {int(round(dist))}م.",
                 })
                 return attrs
 
-        # ===== حساب نافذة الوردية/السماحات =====
+        # ===== حساب نافذة الوردية =====
         now_aware = dj_timezone.now()
         now_local = dj_timezone.localtime(now_aware)
 
         current_shift = None
-        allowed_start = allowed_end = None  # لعرضها في الرد
+        allowed_start = allowed_end = None
 
-        # نبحث في تعيينات الموظف الفعالة
         assign_qs = (EmployeeShiftAssignment.objects
                      .select_related("shift", "location")
                      .filter(employee=employee, active=True)
-                     .order_by('-date', '-start_time', '-end_time'))
+                     .order_by("-date", "-start_time", "-end_time"))
 
         for a in assign_qs:
             sh = getattr(a, "shift", None)
@@ -512,9 +538,22 @@ class AttendanceCheckSerializer(serializers.Serializer):
             if not (start_t and end_t):
                 continue
 
-            # إن كان التعيين مرتبطًا بموقع محدد، تأكد التطابق
+            # لو التعيين مرتبط بموقع محدد تأكد أنه نفس الموقع
             if getattr(a, "location_id", None) and a.location_id != location.id:
                 continue
+
+            anchor = getattr(a, "date", None) or None
+            start_dt, end_dt = self._anchor_times(now_local, start_t, end_t, anchor_date=anchor)
+
+            # يجب أن يغطي الوقت الحالي
+            try:
+                if not (start_dt <= now_local <= end_dt):
+                    continue
+            except Exception:
+                continue
+
+            ok = False
+            win_l = win_r = None
 
             unrestricted = (
                 a.checkin_grace is None and
@@ -522,36 +561,18 @@ class AttendanceCheckSerializer(serializers.Serializer):
                 a.checkout_grace_hours is None
             )
 
-            anchor = getattr(a, "date", None) or None
-            # حدد بداية ونهاية الوردية وفق التاريخ المعتمد
-            start_dt, end_dt = self._anchor_times(now_local, start_t, end_t, anchor_date=anchor)
-
-            # تجاهل التعيينات التي لا تغطي الوقت الحالي (خاصة الوردية الليلية)
-            # إذا كان الآن خارج نطاق start_dt..end_dt نهمل هذه الوردية وننتقل لغيرها
-            try:
-                if not (start_dt <= now_local <= end_dt):
-                    continue
-            except Exception:
-                # في حال أي خطأ نتجاوز
-                continue
-
-            ok = False
-            win_l = win_r = None
-
             if unrestricted:
                 ok = True
                 win_l = None
                 win_r = None
             else:
                 if action == "check_in":
-                    # مسموح فقط من بداية الوردية حتى بداية + checkin_grace
                     grace_min = int(a.checkin_grace or 0)
                     win_l = start_dt
                     win_r = start_dt + timedelta(minutes=grace_min)
                     ok = (win_l <= now_local <= win_r)
-
-                elif action == "check_out":
-                    # انصراف فقط بعد (بداية + checkout_grace[_hours])
+                elif action in ("check_out", "early_check_out"):
+                    # الانصراف العادي: بعد السماح | الانصراف المبكر: سيتحقق لاحقاً من الحضور أولاً
                     if a.checkout_grace_hours is not None:
                         threshold_min = int(round(float(a.checkout_grace_hours) * 60))
                     elif a.checkout_grace is not None:
@@ -560,19 +581,13 @@ class AttendanceCheckSerializer(serializers.Serializer):
                         threshold_min = 0
                     earliest = start_dt + timedelta(minutes=threshold_min)
                     win_l, win_r = earliest, None
-                    ok = (now_local >= earliest)
-
-                else:  # early_check_out: لا شرط وقت
-                    ok = True
-                    win_l, win_r = None, None
+                    ok = (now_local >= earliest) if action == "check_out" else True
 
             if not ok:
-                # منع مهذّب برسالة واضحة (بدون raise)
                 if action == "check_in":
                     reason = (f"⚠️ لا يمكن تسجيل الحضور الآن. "
-                              f"فترة السماح للحضور انتهت عند { (start_dt + timedelta(minutes=int(a.checkin_grace or 0))).strftime('%H:%M') }.")
+                              f"فترة السماح انتهت عند {(start_dt + timedelta(minutes=int(a.checkin_grace or 0))).strftime('%H:%M')}.")
                 else:
-                    # check_out
                     if a.checkout_grace_hours is not None:
                         reason = f"⚠️ لا يمكن تسجيل الانصراف قبل مرور {a.checkout_grace_hours} ساعة من بداية الوردية."
                     elif a.checkout_grace is not None:
@@ -580,70 +595,101 @@ class AttendanceCheckSerializer(serializers.Serializer):
                     else:
                         reason = "⚠️ الانصراف غير مسموح في الوقت الحالي."
                 attrs.update({
-                    "employee": employee,
-                    "location_obj": location,
-                    "blocked": True,
-                    "blocked_reason": reason,
-                    "shift_window_start": win_l,
-                    "shift_window_end": win_r,
+                    "employee": employee, "location_obj": location,
+                    "blocked": True, "blocked_reason": reason,
+                    "shift_window_start": win_l, "shift_window_end": win_r,
                     "current_shift": sh,
                 })
                 return attrs
 
-            # تطابق: نعتمد هذه الوردية
             current_shift, allowed_start, allowed_end = sh, win_l, win_r
             break
 
         if current_shift is None:
-            # خارج أية وردية — منـع مهذّب
             attrs.update({
-                "employee": employee,
-                "location_obj": location,
+                "employee": employee, "location_obj": location,
                 "blocked": True,
                 "blocked_reason": "⚠️ خارج أوقات الوردية الحالية. يرجى مراجعة المشرف.",
-                "shift_window_start": None,
-                "shift_window_end": None,
+                "shift_window_start": None, "shift_window_end": None,
                 "current_shift": None,
             })
             return attrs
 
-        # تعبئة نتائج التحقق
+        # ===== قيود إضافية خاصة بالأفعال =====
+        # منع الحضور مرتين في نفس اليوم
+        if action == "check_in":
+            day_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end   = day_start + timedelta(days=1)
+            if AttendanceRecord.objects.filter(
+                employee=employee,
+                check_in_time__gte=day_start,
+                check_in_time__lt=day_end
+            ).exists():
+                attrs.update({
+                    "employee": employee, "location_obj": location,
+                    "blocked": True,
+                    "blocked_reason": "⚠️ تم تسجيل حضور مسبقًا اليوم.",
+                    "current_shift": current_shift,
+                    "shift_window_start": allowed_start, "shift_window_end": allowed_end,
+                })
+                return attrs
+
+        # الانصراف المبكر: يجب أن يوجد سجل مفتوح + لم يُسجّل مبكرًا اليوم
+        if action == "early_check_out":
+            open_rec = (AttendanceRecord.objects
+                        .filter(employee=employee, check_out_time__isnull=True)
+                        .order_by("-check_in_time").first())
+            if not open_rec:
+                attrs.update({
+                    "employee": employee, "location_obj": location,
+                    "blocked": True,
+                    "blocked_reason": "⚠️ لا يمكن الانصراف المبكر قبل تسجيل الحضور.",
+                })
+                return attrs
+
+            # مرة واحدة في اليوم
+            day_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end   = day_start + timedelta(days=1)
+            if AttendanceRecord.objects.filter(
+                employee=employee,
+                early_checkout=True,
+                check_out_time__gte=day_start,
+                check_out_time__lt=day_end
+            ).exists():
+                attrs.update({
+                    "employee": employee, "location_obj": location,
+                    "blocked": True,
+                    "blocked_reason": "⚠️ تم تسجيل انصراف مبكر مرة اليوم.",
+                })
+                return attrs
+
         attrs.update({
             "employee": employee,
             "location_obj": location,
             "current_shift": current_shift,
-            "shift_window_start": allowed_start,   # قد تكون None لو غير مقيّدة
-            "shift_window_end": allowed_end,       # قد تكون None
+            "shift_window_start": allowed_start,
+            "shift_window_end": allowed_end,
             "blocked": False,
             "blocked_reason": None,
             "now_local": now_local,
         })
         return attrs
 
-    def create(self, validated):
-        """إنشاء سجل الحضور عند check_in، التحديث للانصراف يتم في الـ View.
-
-        نحفظ وقت الحضور بالتوقيت المحلي (وليس بتوقيت الخادم) لضمان تطابقه مع وقت الواجهة.
-        """
-        # لا يتم إنشاء سجل إلا في حالة check_in
-        if validated["action"] != "check_in":
+    def create(self, validated_data):
+        """يُنشئ سجل الحضور عند check_in فقط."""
+        if validated_data["action"] != "check_in":
             return None
 
-        # الوقت المحلي المرسل من validate (إن وُجد) أو نحسبه الآن
-        now_local = validated.get("now_local")
-        if not now_local:
-            # نستخدم localtime لضبط التوقيت في المنطقة الزمنية الافتراضية
-            now_local = dj_timezone.localtime(dj_timezone.now())
-
+        now_local = validated_data.get("now_local") or dj_timezone.localtime(dj_timezone.now())
         rec = AttendanceRecord.objects.create(
-            employee=validated["employee"],
-            location=validated["location_obj"],
-            shift=validated.get("current_shift"),
+            employee=validated_data["employee"],
+            location=validated_data["location_obj"],
+            shift=validated_data.get("current_shift"),
             check_in_time=now_local,
             notes=(
-                f"in lat={validated['lat']}, lng={validated['lng']}, "
-                f"acc={validated.get('accuracy')}, "
-                f"dist={round(validated.get('distance_m') or 0.0, 2)}"
+                f"in lat={validated_data['lat']}, lng={validated_data['lng']}, "
+                f"acc={validated_data.get('accuracy')}, "
+                f"dist={round(validated_data.get('distance_m') or 0.0, 2)}"
             ),
         )
         return rec
@@ -659,23 +705,23 @@ class ResolveLocationSerializer(serializers.Serializer):
         try:
             employee = Employee.objects.get(user=user)
         except Employee.DoesNotExist:
-            raise serializers.ValidationError("لا يوجد ملف موظف مرتبط بهذا الحساب.")
+            raise serializers.ValidationError({"detail": "لا يوجد ملف موظف مرتبط بهذا الحساب."})
         attrs["employee"] = employee
         return attrs
 
-    def find_best_location(self, employee, lat, lng):
+    def find_best_location(self, employee: Employee, lat: float, lng: float):
         qs = Location.objects.filter(assigned_employees=employee)
-        best = None  # (loc, distance_m, reason)
+        best = None  # (loc, distance_m, mode)
 
         for loc in qs:
-            # Polygon أولًا
+            # polygon أولاً
             if getattr(loc, "use_polygon", False) and loc.polygon_coords:
                 try:
                     poly = loc.polygon_coords
-                    # if isinstance(poly, str):
-                    #     poly = json.loads(poly)
+                    if isinstance(poly, str):
+                        poly = json.loads(poly)
                     polygon = [(float(p[0]), float(p[1])) for p in poly]
-                    if point_in_polygon((lat, lng), polygon):
+                    if _point_in_polygon((lat, lng), polygon):
                         return loc, 0.0, "polygon"
                 except Exception:
                     pass
@@ -686,10 +732,9 @@ class ResolveLocationSerializer(serializers.Serializer):
                     la, ln = [float(x.strip()) for x in loc.gps_coordinates.split(",", 1)]
                 except Exception:
                     continue
-                dist = haversine_m(lat, lng, la, ln)
+                dist = _haversine_m(lat, lng, la, ln)
                 if dist <= float(loc.gps_radius):
                     if (best is None) or (dist < best[1]):
                         best = (loc, dist, "radius")
 
         return best
-

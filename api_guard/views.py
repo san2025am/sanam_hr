@@ -1,53 +1,43 @@
-# في ملف api_guard/views.py
+from __future__ import annotations
+
+from datetime import timedelta
 
 from django.utils import timezone as dj_timezone
-from django.db import transaction
-from rest_framework.views import APIView
+from django.contrib.auth import authenticate, get_user_model
+
+from rest_framework import status
+from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework.response import Response
-
+from rest_framework.views import APIView
+from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
-# ... (الـ Views الأخرى مثل الخاصة بنفاذ)
 
-
+from .models import AttendanceRecord, Employee, Salary
 from .serializers import (
     GUARD_ROLE_NAMES,
-  AttendanceCheckSerializer,
     GuardTokenObtainPairSerializer,
-    ResolveLocationSerializer,
     UsernameForgotSerializer,
     UsernameResetSerializer,
-    EmployeeMeSerializer
- 
+    EmployeeMeSerializer,
+    AttendanceCheckSerializer,
+    ResolveLocationSerializer,
 )
-from rest_framework.permissions import IsAuthenticated
 
-
-from django.contrib.auth import get_user_model
-
-from api_guard import serializers
 User = get_user_model()
 
 
-from rest_framework import permissions, status
-from django.shortcuts import get_object_or_404
-from datetime import timedelta
-
-
-
-from django.contrib.auth import authenticate
-from rest_framework.permissions import AllowAny
-from rest_framework_simplejwt.tokens import RefreshToken
-
-from .models import AttendanceRecord, Employee,Salary
-
+# =========================
+# Auth
+# =========================
 
 class GuardLoginView(TokenObtainPairView):
     serializer_class = GuardTokenObtainPairSerializer
 
 
-
 class PasswordForgotUsernameView(APIView):
-    permission_classes = []; authentication_classes = []
+    permission_classes = []
+    authentication_classes = []
+
     def post(self, request):
         s = UsernameForgotSerializer(data=request.data)
         s.is_valid(raise_exception=True)
@@ -56,22 +46,21 @@ class PasswordForgotUsernameView(APIView):
             "detail": "تم إرسال الرمز إلى بريدك الإلكتروني"
         }, status=status.HTTP_200_OK)
 
+
 class PasswordResetUsernameView(APIView):
-    permission_classes = []; authentication_classes = []
+    permission_classes = []
+    authentication_classes = []
+
     def post(self, request):
         s = UsernameResetSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         s.save()
         return Response({"detail": "تم تغيير كلمة المرور"}, status=status.HTTP_200_OK)
-    
 
 
 class GuardLoginAndProfileView(APIView):
     """
-    POST /api/v1/auth/guard/login/
-    body: { "username": "...", "password": "..." }
-    returns: { access, refresh, user: {...}, employee: {...} }
-    (مسموح فقط لمن دوره guard)
+    بديل سريع: يعيد التوكنات + ملف الموظف في رد واحد.
     """
     permission_classes = [AllowAny]
 
@@ -84,27 +73,20 @@ class GuardLoginAndProfileView(APIView):
         user = authenticate(request, username=username, password=password)
         if not user:
             return Response({"detail": "بيانات دخول غير صحيحة"}, status=401)
-
         if not user.is_active:
             return Response({"detail": "الحساب غير مُفعل"}, status=403)
 
         role_name = getattr(getattr(user, "role", None), "name", None)
-        if role_name != "guard":
+        if (role_name or "").strip().casefold() not in {n.casefold() for n in GUARD_ROLE_NAMES}:
             return Response({"detail": "الدخول متاح لحُراس الأمن فقط"}, status=403)
 
-        # جهّز بيانات الموظف
         try:
-            employee = Employee.objects.select_related(
-                "user", "user__role", "salary"
-            ).prefetch_related("locations").get(user=user)
-            Salary.objects.get_or_create(employee=employee) 
-
+            employee = Employee.objects.select_related("user", "user__role").get(user=user)
+            Salary.objects.get_or_create(employee=employee)
         except Employee.DoesNotExist:
             return Response({"detail": "لا يوجد ملف موظف مرتبط بهذا المستخدم"}, status=404)
 
         emp_data = EmployeeMeSerializer(employee).data
-
-        # أنشئ توكنات JWT
         refresh = RefreshToken.for_user(user)
         access = refresh.access_token
 
@@ -121,29 +103,9 @@ class GuardLoginAndProfileView(APIView):
             "employee": emp_data
         }, status=200)
 
-# أضف هذا الاستيراد أعلى الملف
-
-# عدّل المسار حسب مكان موديل Employee لديك
 
 class GuardMeView(APIView):
-    """
-    يعيد بيانات الموظف الحارس الحالي (حسب التوكن).
-    يدعم POST (ويمكن دعم GET أيضًا إن رغبت).
-    """
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        u = request.user
-        role = getattr(getattr(u, "role", None), "name", "") or ""
-        if role.strip().casefold() not in {n.casefold() for n in GUARD_ROLE_NAMES}:
-            return Response({"detail": "غير مصرح"}, status=status.HTTP_403_FORBIDDEN)
-
-        try:
-            emp = Employee.objects.select_related("user", "user__role").get(user=u)
-        except Employee.DoesNotExist:
-            return Response({"detail": "لا يوجد ملف موظف"}, status=status.HTTP_404_NOT_FOUND)
-
-        return Response(EmployeeMeSerializer(emp).data, status=status.HTTP_200_OK)
+    """يعيد بيانات الموظف الحالي."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -151,26 +113,27 @@ class GuardMeView(APIView):
         role_name = (getattr(getattr(u, "role", None), "name", "") or "").strip().casefold()
         if role_name not in {n.casefold() for n in GUARD_ROLE_NAMES}:
             return Response({"detail": "غير مصرح"}, status=status.HTTP_403_FORBIDDEN)
-
         try:
             emp = Employee.objects.select_related("user", "user__role").get(user=u)
         except Employee.DoesNotExist:
             return Response({"detail": "لا يوجد ملف موظف"}, status=status.HTTP_404_NOT_FOUND)
-
         return Response(EmployeeMeSerializer(emp).data, status=status.HTTP_200_OK)
-    
 
-    
+
+# =========================
+# Attendance
+# =========================
 
 class AttendanceCheckAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
-    def _deny(self, *, action, detail, reason_code, start=None, end=None, now=None, extra=None):
+    def _deny(self, *, action, detail, reason_code,
+              start=None, end=None, now=None, extra=None):
         payload = {
             "ok": False,
-            "performed": False,      # لم تُنفّذ العملية
+            "performed": False,
             "action": action,
-            "detail": detail,        # نص مهذّب للمستخدم
+            "detail": detail,
             "reason_code": reason_code,
         }
         wnd = {}
@@ -179,38 +142,42 @@ class AttendanceCheckAPIView(APIView):
         if now   is not None: wnd["now"]  = now
         if wnd: payload["window"] = wnd
         if extra: payload.update(extra)
-        # نرجع 200 حتى لا يظهر "HTTP 400" في التطبيق
         return Response(payload, status=status.HTTP_200_OK)
 
     def post(self, request):
         ser = AttendanceCheckSerializer(data=request.data, context={"request": request})
         if not ser.is_valid():
-            # أخطاء إدخال (حقول ناقصة/قيمة غير صالحة) — نعيد 200 برسالة لطيفة أيضاً
+            # صياغة رسالة مفصلة بدل "تحقق من الحقول"
+            err_text = []
+            for field, msgs in ser.errors.items():
+                if isinstance(msgs, (list, tuple)):
+                    msgs = ", ".join([str(m) for m in msgs])
+                err_text.append(f"{field}: {msgs}")
+            nice = "؛ ".join(err_text) if err_text else "الرجاء التحقق من الحقول المدخلة."
             return Response({
                 "ok": False, "performed": False,
                 "action": request.data.get("action"),
-                "detail": "تعذر معالجة الطلب. الرجاء التحقق من الحقول المدخلة.",
+                "detail": f"تعذر معالجة الطلب. {nice}",
                 "errors": ser.errors
             }, status=status.HTTP_200_OK)
 
-        action   = ser.validated_data["action"]
-        employee = ser.validated_data["employee"]
-        location = ser.validated_data["location_obj"]
-        lat      = ser.validated_data["lat"]
-        lng      = ser.validated_data["lng"]
+        # استخراج القيم
+        action   = ser.validated_data.get("action")
+        employee = ser.validated_data.get("employee")
+        location = ser.validated_data.get("location_obj")
+        lat      = ser.validated_data.get("lat")
+        lng      = ser.validated_data.get("lng")
         acc      = ser.validated_data.get("accuracy")
         dist     = ser.validated_data.get("distance_m")
 
-        # الوقت الحالي للتطبيق: نحفظ كل من التوقيت العام والتوقيت المحلي
         now       = dj_timezone.now()
         now_local = dj_timezone.localtime(now)
 
-        start_dt = ser.validated_data.get("shift_window_start")
-        end_dt   = ser.validated_data.get("shift_window_end")
-        blocked  = ser.validated_data.get("blocked")
-        reason   = ser.validated_data.get("blocked_reason")
+        start_dt  = ser.validated_data.get("shift_window_start")
+        end_dt    = ser.validated_data.get("shift_window_end")
+        blocked   = ser.validated_data.get("blocked")
+        reason    = ser.validated_data.get("blocked_reason")
 
-        # لو الـ serializer قرر المنع، نرجع رسالة فقط بدون تنفيذ
         if blocked:
             return self._deny(
                 action=action,
@@ -219,46 +186,9 @@ class AttendanceCheckAPIView(APIView):
                 start=start_dt, end=end_dt, now=now_local
             )
 
-        # ===== تنفيذ العمليات =====
+        # ===== تنفيذ الإجراءات =====
         if action == "check_in":
-            # تأكد من عدم وجود تسجيل حضور سابق في نفس اليوم (لمنع تكرار الحضور في الوردية)
-            # نحسب بداية ونهاية اليوم المحلي الحالي
-            try:
-                today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-                today_end   = today_start + timedelta(days=1)
-                existing = AttendanceRecord.objects.filter(
-                    employee=employee,
-                    check_in_time__gte=today_start,
-                    check_in_time__lt=today_end
-                ).exists()
-                if existing:
-                    return self._deny(
-                        action=action,
-                        detail="⚠️ تم تسجيل حضور مسبقًا اليوم، لا يمكن تسجيل حضور آخر في نفس الوردية.",
-                        reason_code="already_checked_in_today",
-                        start=start_dt, end=end_dt, now=now_local
-                    )
-            except Exception:
-                pass
-
-            # تحقق من عدم وجود تسجيل حضور لنفس الوردية (نفس الشيفت) حتى لا يحدث أكثر من حضور في الوردية الواحدة
-            try:
-                current_shift = ser.validated_data.get("current_shift")
-                if current_shift is not None:
-                    exists_for_shift = AttendanceRecord.objects.filter(
-                        employee=employee,
-                        shift=current_shift
-                    ).exists()
-                    if exists_for_shift:
-                        return self._deny(
-                            action=action,
-                            detail="⚠️ تم تسجيل حضور لهذه الوردية مسبقًا، لا يمكن تسجيل حضور آخر لنفس الوردية.",
-                            reason_code="already_checked_in_shift",
-                            start=start_dt, end=end_dt, now=now_local
-                        )
-            except Exception:
-                pass
-            # إذا كان هناك سجل حضور مفتوح مسبقًا فلا يُسمح بتسجيل حضور جديد
+            # منع تسجيل حضور جديد إن وُجد سجل مفتوح
             open_rec = (AttendanceRecord.objects
                         .filter(employee=employee, check_out_time__isnull=True)
                         .order_by("-check_in_time").first())
@@ -270,7 +200,23 @@ class AttendanceCheckAPIView(APIView):
                     start=start_dt, end=end_dt, now=now_local
                 )
 
-            rec = ser.save()  # إنشاء سجل الحضور
+            # منع تعدد الحضور في نفس اليوم
+            today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+            today_end   = today_start + timedelta(days=1)
+            if AttendanceRecord.objects.filter(
+                employee=employee,
+                check_in_time__gte=today_start,
+                check_in_time__lt=today_end
+            ).exists():
+                return self._deny(
+                    action=action,
+                    detail="⚠️ تم تسجيل حضور مسبقًا اليوم.",
+                    reason_code="already_checked_in_today",
+                    start=start_dt, end=end_dt, now=now_local
+                )
+
+            # إنشاء السجل
+            rec = ser.save()
             return Response({
                 "ok": True,
                 "performed": True,
@@ -278,7 +224,8 @@ class AttendanceCheckAPIView(APIView):
                 "detail": "✅ تم تسجيل حضورك بنجاح.",
                 "note": ("الوردية غير مقيّدة زمنيًا."
                          if start_dt is None and end_dt is None
-                         else (f"الفترة المسموحة للحضور: {start_dt.strftime('%H:%M')} → {end_dt.strftime('%H:%M')}" if start_dt and end_dt else "")),
+                         else (f"الفترة المسموحة للحضور: {start_dt.strftime('%H:%M')} → {end_dt.strftime('%H:%M')}"
+                               if start_dt and end_dt else "")),
                 "record_id": str(rec.id),
                 "employee": getattr(employee, "full_name", str(employee.pk)),
                 "location_id": str(location.id) if getattr(location, "id", None) else None,
@@ -286,13 +233,27 @@ class AttendanceCheckAPIView(APIView):
             }, status=status.HTTP_201_CREATED)
 
         elif action == "check_out":
+            # منع الانصراف العادي إذا كان هناك انصراف مبكر اليوم
+            today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+            today_end   = today_start + timedelta(days=1)
+            if AttendanceRecord.objects.filter(
+                employee=employee,
+                check_in_time__gte=today_start, check_in_time__lt=today_end,
+                early_checkout=True
+            ).exists():
+                return self._deny(
+                    action=action,
+                    detail="⚠️ تم تسجيل انصراف مبكر اليوم؛ لا يمكن الانصراف العادي.",
+                    reason_code="early_checkout_done",
+                    start=start_dt, end=end_dt, now=now_local
+                )
+
             rec = (AttendanceRecord.objects
                    .filter(employee=employee, check_out_time__isnull=True)
                    .order_by("-check_in_time").first())
             if not rec:
                 return self._deny(action=action, detail="لا يوجد سجل حضور مفتوح لإقفاله.", reason_code="no_open_record")
 
-            # نحفظ وقت الانصراف بالتوقيت المحلي لضمان توافقه مع عرض الواجهة
             rec.check_out_time = now_local
             rec.notes = (rec.notes or "") + f" | out lat={lat}, lng={lng}, acc={acc}, dist={dist}"
             rec.location = rec.location or location
@@ -313,18 +274,33 @@ class AttendanceCheckAPIView(APIView):
             }, status=status.HTTP_200_OK)
 
         elif action == "early_check_out":
-            reason_txt = (request.data.get("early_reason") or "").strip()
-            file_obj = request.FILES.get("early_attachment")
-            if not reason_txt:
-                return self._deny(action=action, detail="يجب كتابة سبب الانصراف المبكر.", reason_code="early_checkout_reason_required")
-
+            # يجب وجود سجل حضور مفتوح
             rec = (AttendanceRecord.objects
                    .filter(employee=employee, check_out_time__isnull=True)
                    .order_by("-check_in_time").first())
             if not rec:
                 return self._deny(action=action, detail="لا يوجد سجل حضور مفتوح لإقفاله.", reason_code="no_open_record")
 
-            # نحفظ وقت الانصراف بالتوقيت المحلي لضمان توافقه مع عرض الواجهة
+            # مرّة واحدة يوميًا
+            today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+            today_end   = today_start + timedelta(days=1)
+            if AttendanceRecord.objects.filter(
+                employee=employee,
+                check_in_time__gte=today_start, check_in_time__lt=today_end,
+                early_checkout=True
+            ).exists():
+                return self._deny(
+                    action=action,
+                    detail="⚠️ تم تسجيل انصراف مبكر مسبقًا اليوم.",
+                    reason_code="early_checkout_once_per_day",
+                    start=start_dt, end=end_dt, now=now_local
+                )
+
+            reason_txt = (request.data.get("early_reason") or "").strip()
+            file_obj   = request.FILES.get("early_attachment")
+            if not reason_txt:
+                return self._deny(action=action, detail="يجب كتابة سبب الانصراف المبكر.", reason_code="early_checkout_reason_required")
+
             rec.check_out_time = now_local
             rec.early_checkout = True
             rec.early_reason   = reason_txt
@@ -347,8 +323,8 @@ class AttendanceCheckAPIView(APIView):
                 "location_name": getattr(rec.location, "name", None) if rec.location else None,
             }, status=status.HTTP_200_OK)
 
-        # إجراء غير مدعوم
         return self._deny(action=action, detail="إجراء غير مدعوم.", reason_code="unsupported_action")
+
 
 class ResolveLocationAPIView(APIView):
     permission_classes = [IsAuthenticated]
@@ -376,7 +352,7 @@ class ResolveLocationAPIView(APIView):
 
         data = {
             "detail": "تم تحديد الموقع",
-            "location_id": str(loc.id),  # UUID كنص
+            "location_id": str(loc.id),
             "name": loc.name,
             "client_name": loc.client_name,
             "lat": la, "lng": ln,
@@ -385,4 +361,3 @@ class ResolveLocationAPIView(APIView):
             "mode": mode,  # polygon | radius
         }
         return Response(data, status=200)
-
