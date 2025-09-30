@@ -5,7 +5,7 @@ from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 
 from .models import (
     EmployeeShiftAssignment, Role, User, Employee, Location, EmployeeLocationAssignment, Task, Shift,
-    AttendanceRecord, Salary, Report, ReportAttachment, Request,
+    AttendanceRecord, Salary, Report, ReportAttachment, Request, EmployeeLeaveBalance,
     ViolationRule, EmployeeViolation,  # <-- الجديد بدل Violation
     Contract, Advance, Custody, LogisticRequest,
     UniformItem, UniformDelivery, UniformDeliveryItem
@@ -102,7 +102,10 @@ class RoleAdmin(admin.ModelAdmin):
 
 @admin.register(Employee)
 class EmployeeAdmin(admin.ModelAdmin):
-    list_display = ('full_name', 'national_id', 'phone_number', 'bank_name', 'supervisor')
+    list_display = (
+        'full_name', 'national_id', 'phone_number', 'bank_name',
+        'monthly_leave_quota_hours', 'supervisor'
+    )
     search_fields = ('full_name', 'national_id', 'phone_number', 'bank_account')
     list_filter = ('bank_name', 'supervisor')
     autocomplete_fields = ('supervisor',)
@@ -115,6 +118,7 @@ class EmployeeAdmin(admin.ModelAdmin):
         }),
         ('العمل', {'fields': ('hire_date',)}),
         ('البنك والراتب', {'fields': ('bank_name', 'bank_account')}),
+        ('الإجازات', {'fields': ('monthly_leave_quota_hours',)}),
         ('تعليمات', {'fields': ('instructions',)}),
     )
 
@@ -253,10 +257,14 @@ class ReportAdmin(admin.ModelAdmin):
 
 @admin.register(Request)
 class RequestAdmin(admin.ModelAdmin):
-    list_display = ('employee', 'request_type', 'status', 'approver', 'created_at')
-    list_filter = ('status', 'request_type')
+    list_display = (
+        'employee', 'request_type', 'status', 'approver', 'created_at',
+        'leave_start', 'leave_end', 'leave_hours', 'leave_deducted'
+    )
+    list_filter = ('status', 'request_type', 'leave_deducted')
     search_fields = ('employee__full_name', 'description')
     autocomplete_fields = ('employee', 'approver')
+    readonly_fields = ('leave_hours', 'leave_deducted')
 
 # =========================
 # Violations (الجديد)
@@ -289,10 +297,24 @@ class ContractAdmin(admin.ModelAdmin):
 
 @admin.register(Advance)
 class AdvanceAdmin(admin.ModelAdmin):
-    list_display = ('employee', 'amount', 'status', 'requested_at')
-    list_filter = ('status',)
+    list_display = ('employee', 'amount', 'status', 'requested_at', 'approved_at', 'deduction_applied')
+    list_filter = ('status', 'deduction_applied')
     search_fields = ('employee__full_name', 'reason')
     autocomplete_fields = ('employee',)
+    readonly_fields = ('approved_at', 'deduction_applied')
+
+
+@admin.register(EmployeeLeaveBalance)
+class EmployeeLeaveBalanceAdmin(admin.ModelAdmin):
+    list_display = ('employee', 'year', 'month', 'quota_hours', 'used_hours', 'remaining_hours_display')
+    list_filter = ('year', 'month')
+    search_fields = ('employee__full_name',)
+    autocomplete_fields = ('employee',)
+    readonly_fields = ('remaining_hours_display',)
+
+    def remaining_hours_display(self, obj):
+        return obj.remaining_hours
+    remaining_hours_display.short_description = 'الرصيد المتبقي'
 
 @admin.register(Custody)
 class CustodyAdmin(admin.ModelAdmin):
