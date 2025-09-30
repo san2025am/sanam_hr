@@ -738,3 +738,85 @@ class ResolveLocationSerializer(serializers.Serializer):
                         best = (loc, dist, "radius")
 
         return best
+<<<<<<< HEAD
+=======
+
+
+class ReportAttachmentSerializer(serializers.ModelSerializer):
+    file_url = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ReportAttachment
+        fields = ["id", "file", "file_url", "file_type", "uploaded_at"]
+        read_only_fields = ["id", "file", "file_url", "file_type", "uploaded_at"]
+
+    def get_file_url(self, obj):
+        if not obj.file:
+            return None
+        request = self.context.get("request")
+        url = obj.file.url
+        return request.build_absolute_uri(url) if request else url
+
+
+class ReportSerializer(serializers.ModelSerializer):
+    location = serializers.PrimaryKeyRelatedField(
+        queryset=Location.objects.all(), allow_null=True, required=False
+    )
+    location_name = serializers.CharField(source="location.name", read_only=True)
+    report_type_display = serializers.CharField(source="get_report_type_display", read_only=True)
+    status_display = serializers.CharField(source="get_status_display", read_only=True)
+    attachments = ReportAttachmentSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Report
+        fields = [
+            "id",
+            "report_type",
+            "report_type_display",
+            "description",
+            "status",
+            "status_display",
+            "created_at",
+            "closed_at",
+            "location",
+            "location_name",
+            "attachments",
+        ]
+        read_only_fields = [
+            "id",
+            "status",
+            "status_display",
+            "created_at",
+            "closed_at",
+            "location_name",
+            "attachments",
+        ]
+
+
+class RequestSerializer(serializers.ModelSerializer):
+    request_type_display = serializers.CharField(source="get_request_type_display", read_only=True)
+    status_display = serializers.CharField(source="get_status_display", read_only=True)
+    approver_name = serializers.CharField(source="approver.full_name", read_only=True)
+
+    class Meta:
+        model = Request
+        fields = [
+            "id",
+            "request_type",
+            "request_type_display",
+            "description",
+            "status",
+            "status_display",
+            "approval_notes",
+            "approver_name",
+            "created_at",
+        ]
+        read_only_fields = [
+            "id",
+            "status",
+            "status_display",
+            "approval_notes",
+            "approver_name",
+            "created_at",
+        ]
+>>>>>>> ab2c0cb (التقارير والطلبات)
