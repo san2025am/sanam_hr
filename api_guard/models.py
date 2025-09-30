@@ -336,7 +336,12 @@ class ReportAttachment(BaseModel):
 
 
 class Request(BaseModel):
-    REQUEST_TYPE_CHOICES = [('coverage', 'تغطية'), ('transfer', 'نقل'), ('materials', 'طلب مواد')]
+    REQUEST_TYPE_CHOICES = [
+        ('coverage', 'تغطية'),
+        ('leave', 'إجازة'),
+        ('transfer', 'نقل'),
+        ('materials', 'طلب مواد'),
+    ]
     STATUS_CHOICES = [('pending', 'قيد المراجعة'), ('approved', 'تمت الموافقة'), ('rejected', 'مرفوض')]
 
     employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name='requests', verbose_name="صاحب الطلب")
