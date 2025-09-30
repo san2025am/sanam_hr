@@ -1,5 +1,6 @@
 # api_guard/models.py
 
+from datetime import datetime, date
 from decimal import Decimal, ROUND_HALF_UP
 
 from django.db import models, transaction
@@ -691,6 +692,40 @@ def _get_leave_balance(employee: Employee, dt) -> tuple[EmployeeLeaveBalance, bo
     return balance, created
 
 
+def _month_floor(dt: datetime | date) -> date:
+    if isinstance(dt, datetime):
+        return date(dt.year, dt.month, 1)
+    return date(dt.year, dt.month, 1)
+
+
+def _iter_months(start: date, end: date):
+    current = date(start.year, start.month, 1)
+    end_point = date(end.year, end.month, 1)
+    while current <= end_point:
+        yield current
+        if current.month == 12:
+            current = date(current.year + 1, 1, 1)
+        else:
+            current = date(current.year, current.month + 1, 1)
+
+
+def _ensure_leave_balances(employee: Employee, upto_dt: datetime | date) -> list[EmployeeLeaveBalance]:
+    hire_date = employee.hire_date
+    if not hire_date:
+        raise ValidationError("يجب تحديد تاريخ التعيين للموظف قبل احتساب الإجازات")
+
+    target = _month_floor(upto_dt)
+    start = date(hire_date.year, hire_date.month, 1)
+    if start > target:
+        start = target
+
+    balances: list[EmployeeLeaveBalance] = []
+    for month_date in _iter_months(start, target):
+        balance, _ = _get_leave_balance(employee, month_date)
+        balances.append(balance)
+    return balances
+
+
 @receiver(pre_save, sender=Request)
 def prepare_leave_request(sender, instance: Request, **kwargs):
     instance._old_status = None
@@ -746,6 +781,21 @@ def prepare_leave_request(sender, instance: Request, **kwargs):
             remaining = _quantize_hours(quota - used_without_current) or Decimal('0')
             raise ValidationError(
                 f"رصيد الإجازة المتبقي ({remaining} ساعة) لا يكفي لتغطية هذه الإجازة"
+            )
+
+        cumulative_balances = _ensure_leave_balances(instance.employee, instance.leave_start)
+        total_quota = sum((b.quota_hours or Decimal('0')) for b in cumulative_balances)
+        total_used = sum((b.used_hours or Decimal('0')) for b in cumulative_balances)
+        if instance._old_status == 'approved':
+            total_used -= instance._old_leave_hours or Decimal('0')
+            if total_used < 0:
+                total_used = Decimal('0')
+
+        projected_total = total_used + (instance.leave_hours or Decimal('0'))
+        if projected_total - total_quota > Decimal('0.0001'):
+            remaining_total = _quantize_hours(total_quota - total_used) or Decimal('0')
+            raise ValidationError(
+                f"إجمالي رصيد الإجازات المتاح ({remaining_total} ساعة) لا يكفي لتغطية هذه الإجازة"
             )
 
 
