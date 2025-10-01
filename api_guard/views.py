@@ -27,6 +27,7 @@ from .serializers import (
     UsernameResetSerializer,
     EmployeeMeSerializer,
 )
+from .services.attendance import close_stale_attendance_for_employee
 
 
 User = get_user_model()
@@ -160,6 +161,17 @@ class AttendanceCheckAPIView(APIView):
         return Response(payload, status=status.HTTP_200_OK)
 
     def post(self, request):
+        cleanup_employee = (Employee.objects
+                              .select_related("user", "supervisor")
+                              .filter(user=request.user)
+                              .first())
+        if cleanup_employee:
+            close_stale_attendance_for_employee(
+                cleanup_employee,
+                as_of=dj_timezone.now(),
+                notify=True,
+            )
+
         ser = AttendanceCheckSerializer(data=request.data, context={"request": request})
         if not ser.is_valid():
             # صياغة رسالة مفصلة بدل "تحقق من الحقول"
