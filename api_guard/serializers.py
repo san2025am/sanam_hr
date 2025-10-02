@@ -738,8 +738,6 @@ class ResolveLocationSerializer(serializers.Serializer):
                         best = (loc, dist, "radius")
 
         return best
-<<<<<<< HEAD
-=======
 
 
 class ReportAttachmentSerializer(serializers.ModelSerializer):
@@ -819,4 +817,3 @@ class RequestSerializer(serializers.ModelSerializer):
             "approver_name",
             "created_at",
         ]
->>>>>>> ab2c0cb (التقارير والطلبات)

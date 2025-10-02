@@ -3,12 +3,10 @@ from __future__ import annotations
 from datetime import timedelta
 
 from django.utils import timezone as dj_timezone
-<<<<<<< HEAD
 from django.contrib.auth import authenticate, get_user_model
 
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated, AllowAny
-=======
 from django.db import transaction
 from datetime import timedelta
 
@@ -16,7 +14,6 @@ from django.contrib.auth import authenticate, get_user_model
 from rest_framework import generics, status
 from rest_framework.exceptions import PermissionDenied, NotFound
 from rest_framework.permissions import AllowAny, IsAuthenticated
->>>>>>> ab2c0cb (التقارير والطلبات)
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -25,15 +22,12 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from .models import AttendanceRecord, Employee, Salary
 from .serializers import (
     GUARD_ROLE_NAMES,
-<<<<<<< HEAD
-=======
     AttendanceCheckSerializer,
->>>>>>> ab2c0cb (التقارير والطلبات)
     GuardTokenObtainPairSerializer,
+    ReportSerializer,
     UsernameForgotSerializer,
     UsernameResetSerializer,
     EmployeeMeSerializer,
-<<<<<<< HEAD
     AttendanceCheckSerializer,
     ResolveLocationSerializer,
 )
@@ -44,10 +38,7 @@ User = get_user_model()
 # =========================
 # Auth
 # =========================
-=======
-    ReportSerializer,
-    RequestSerializer,
-)
+
 from .models import AttendanceRecord, Employee, Salary, Report, ReportAttachment, Request
 
 
@@ -66,7 +57,6 @@ def _require_guard_employee(user):
     except Employee.DoesNotExist as exc:
         raise NotFound("لا يوجد ملف موظف مرتبط بهذا الحساب") from exc
 
->>>>>>> ab2c0cb (التقارير والطلبات)
 
 class GuardLoginView(TokenObtainPairView):
     serializer_class = GuardTokenObtainPairSerializer
@@ -399,8 +389,6 @@ class ResolveLocationAPIView(APIView):
             "mode": mode,  # polygon | radius
         }
         return Response(data, status=200)
-<<<<<<< HEAD
-=======
 
 
 class GuardReportListCreateView(generics.ListCreateAPIView):
@@ -457,4 +445,3 @@ class GuardRequestListCreateView(generics.ListCreateAPIView):
     def perform_create(self, serializer):
         employee = _require_guard_employee(self.request.user)
         serializer.save(employee=employee)
->>>>>>> ab2c0cb (التقارير والطلبات)
