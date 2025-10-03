@@ -301,11 +301,21 @@ class AttendanceCheckAPIView(APIView):
         if not ser.is_valid():
             # صياغة رسالة مفصلة بدل "تحقق من الحقول"
             err_text = []
+            nice_hint = None
             for field, msgs in ser.errors.items():
-                if isinstance(msgs, (list, tuple)):
-                    msgs = ", ".join([str(m) for m in msgs])
-                err_text.append(f"{field}: {msgs}")
-            nice = "؛ ".join(err_text) if err_text else "الرجاء التحقق من الحقول المدخلة."
+                final_msgs = []
+                for msg in (msgs if isinstance(msgs, (list, tuple)) else [msgs]):
+                    msg_text = str(msg)
+                    final_msgs.append(msg_text)
+                    final_lower = msg_text.casefold()
+                    if "valid uuid" in final_lower or "uuid" in final_lower:
+                        nice_hint = (
+                            "تعذر تحديد موقع العمل. يرجى التأكد من اختيار الموقع الصحيح"
+                            " أو إعادة محاولة تحديد الموقع تلقائيًا ثم إعادة المحاولة."
+                        )
+                err_text.append(f"{field}: {', '.join(final_msgs)}")
+
+            nice = nice_hint or ("؛ ".join(err_text) if err_text else "الرجاء التحقق من الحقول المدخلة.")
             return Response({
                 "ok": False, "performed": False,
                 "action": request.data.get("action"),
