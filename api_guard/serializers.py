@@ -481,7 +481,7 @@ class AttendanceCheckSerializer(serializers.Serializer):
                 attrs.update({
                     "employee": employee, "location_obj": location,
                     "blocked": True,
-                    "blocked_reason": "⚠️ أنت خارج حدود الموقع المحددة.",
+                    "blocked_reason": "⚠️ جهازك حالياً خارج حدود الموقع المعتمد. يرجى الانتقال إلى نطاق الموقع ثم المحاولة مجددًا.",
                 })
                 return attrs
 
@@ -512,7 +512,11 @@ class AttendanceCheckSerializer(serializers.Serializer):
                 attrs.update({
                     "employee": employee, "location_obj": location,
                     "blocked": True,
-                    "blocked_reason": f"⚠️ خارج النطاق المسموح ({int(radius)}م). المسافة الحالية: {int(round(dist))}م.",
+                    "blocked_reason": (
+                        "⚠️ جهازك خارج نطاق الموقع المسموح به."
+                        f" المسافة عن الموقع: {int(round(dist))}م (النطاق المتاح {int(radius)}م)."
+                        " يرجى الاقتراب من الموقع ثم إعادة المحاولة."
+                    ),
                 })
                 return attrs
 
