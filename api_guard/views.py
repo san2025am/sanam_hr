@@ -22,11 +22,13 @@ from .models import (
     AttendanceRecord,
     Employee,
     Salary,
+    Task,
     Report,
     Request,
     Advance,
     TrustedDevice,
     DeviceLoginChallenge,
+    UniformItem,
 )
 from .serializers import (
     GUARD_ROLE_NAMES,
@@ -39,6 +41,8 @@ from .serializers import (
     UsernameForgotSerializer,
     UsernameResetSerializer,
     EmployeeMeSerializer,
+    TaskMiniSerializer,
+    GuardTaskUpdateSerializer,
 )
 from .emailer import send_email_otp
 from .services.attendance import close_stale_attendance_for_employee
@@ -51,6 +55,8 @@ logger = logging.getLogger(__name__)
 
 
 _GUARD_ROLE_NAMES_CI = {name.casefold() for name in GUARD_ROLE_NAMES}
+
+TASK_STATUS_FLOW = ['new', 'accepted', 'in_progress', 'completed']
 
 
 def _device_hash(raw_id: str) -> str:
@@ -660,6 +666,7 @@ class GuardReportListCreateView(generics.ListCreateAPIView):
 
 
 class GuardRequestListCreateView(generics.ListCreateAPIView):
+    permission_classes = [IsAuthenticated]
     serializer_class = RequestSerializer
 
     def get_queryset(self):
@@ -699,3 +706,82 @@ class GuardAdvanceListCreateView(generics.ListCreateAPIView):
     def perform_create(self, serializer):
         employee = self.get_serializer_context().get("employee") or _require_guard_employee(self.request.user)
         serializer.save(employee=employee)
+
+
+class GuardTaskListView(generics.ListAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = TaskMiniSerializer
+
+    def get_queryset(self):
+        employee = _require_guard_employee(self.request.user)
+        qs = Task.objects.filter(assigned_to=employee).select_related('location').order_by('-due_date', '-created_at')
+        status_filter = (self.request.query_params.get('status') or '').strip().lower()
+        if status_filter:
+            if status_filter == 'active':
+                qs = qs.exclude(status='completed')
+            elif status_filter in {choice[0] for choice in Task.STATUS_CHOICES}:
+                qs = qs.filter(status=status_filter)
+        return qs
+
+
+class GuardTaskUpdateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def patch(self, request, pk):
+        employee = _require_guard_employee(request.user)
+        try:
+            task = Task.objects.select_related('location').get(id=pk, assigned_to=employee)
+        except Task.DoesNotExist as exc:
+            raise NotFound("لم يتم العثور على المهمة") from exc
+
+        serializer = GuardTaskUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        new_status = serializer.validated_data['status']
+        status_note = serializer.validated_data.get('status_note') or ''
+
+        if new_status not in TASK_STATUS_FLOW:
+            return Response({"detail": "الحالة الجديدة غير مدعومة."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            current_index = TASK_STATUS_FLOW.index(task.status)
+            target_index = TASK_STATUS_FLOW.index(new_status)
+        except ValueError:
+            return Response({"detail": "لا يمكن تحديث هذه المهمة."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if target_index < current_index:
+            return Response({"detail": "لا يمكن الرجوع إلى حالة سابقة."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if target_index > current_index + 1:
+            return Response({"detail": "يجب تحديث حالة المهمة بالتسلسل."}, status=status.HTTP_400_BAD_REQUEST)
+
+        updated_fields = []
+        if task.status != new_status:
+            task.status = new_status
+            updated_fields.append('status')
+
+        if status_note != (task.status_note or ''):
+            task.status_note = status_note
+            updated_fields.append('status_note')
+
+        if updated_fields:
+            updated_fields.append('updated_at')
+            task.save(update_fields=updated_fields)
+
+        return Response(TaskMiniSerializer(task).data, status=status.HTTP_200_OK)
+
+
+class GuardUniformItemListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        _require_guard_employee(request.user)
+        items = UniformItem.objects.order_by('name')
+        data = [
+            {
+                'id': str(item.id),
+                'name': item.name,
+                'price': str(item.price),
+            }
+            for item in items
+        ]
+        return Response({'results': data}, status=status.HTTP_200_OK)

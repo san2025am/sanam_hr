@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import re
 import secrets
+import uuid
 from datetime import timedelta
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.utils import timezone as dj_timezone
+from django.db import transaction
 from django.db.models import Q
 
 from rest_framework import serializers
@@ -61,9 +63,12 @@ from .models import (
     ViolationRule, EmployeeViolation, Contract, Custody,
     UniformItem, UniformDelivery, UniformDeliveryItem, PasswordResetSMS,
     EmployeeShiftAssignment,
+    UniformItem, UniformDelivery, UniformDeliveryItem,
 )
 
 User = get_user_model()
+
+_TASK_STATUS_FLOW = ['new', 'accepted', 'in_progress', 'completed']
 
 # =========================
 # Auth / Guard login
@@ -179,9 +184,45 @@ class UsernameResetSerializer(serializers.Serializer):
 
 class TaskMiniSerializer(serializers.ModelSerializer):
     location_name = serializers.CharField(source="location.name", read_only=True)
+    status_label = serializers.CharField(source="get_status_display", read_only=True)
+    status_note = serializers.CharField(read_only=True, allow_null=True)
+    next_status = serializers.SerializerMethodField()
+    next_status_label = serializers.SerializerMethodField()
+
     class Meta:
         model = Task
-        fields = ["id", "title", "description", "status", "due_date", "location_name"]
+        fields = [
+            "id",
+            "title",
+            "description",
+            "status",
+            "status_label",
+            "status_note",
+            "next_status",
+            "next_status_label",
+            "due_date",
+            "location_name",
+        ]
+
+    def get_next_status(self, obj):
+        try:
+            idx = _TASK_STATUS_FLOW.index(obj.status)
+        except ValueError:
+            return None
+        if idx + 1 < len(_TASK_STATUS_FLOW):
+            return _TASK_STATUS_FLOW[idx + 1]
+        return None
+
+    def get_next_status_label(self, obj):
+        next_status = self.get_next_status(obj)
+        if not next_status:
+            return None
+        return dict(Task.STATUS_CHOICES).get(next_status)
+
+
+class GuardTaskUpdateSerializer(serializers.Serializer):
+    status = serializers.ChoiceField(choices=[choice[0] for choice in Task.STATUS_CHOICES])
+    status_note = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
 class ShiftAssignmentMiniSerializer(serializers.ModelSerializer):
     shift_name    = serializers.CharField(source="shift.name", read_only=True)
@@ -834,6 +875,17 @@ class RequestSerializer(serializers.ModelSerializer):
     request_type_display = serializers.CharField(source="get_request_type_display", read_only=True)
     status_display = serializers.CharField(source="get_status_display", read_only=True)
     approver_name = serializers.CharField(source="approver.full_name", read_only=True)
+    uniform_delivery = serializers.SerializerMethodField()
+
+    payment_method = serializers.CharField(write_only=True, required=False, allow_blank=True)
+    uniform_items = serializers.ListField(
+        child=serializers.DictField(), write_only=True, required=False
+    )
+    uniform_location_id = serializers.CharField(write_only=True, required=False, allow_blank=True)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._uniform_payload = None
 
     class Meta:
         model = Request
@@ -851,6 +903,10 @@ class RequestSerializer(serializers.ModelSerializer):
             "approval_notes",
             "approver_name",
             "created_at",
+            "uniform_delivery",
+            "payment_method",
+            "uniform_items",
+            "uniform_location_id",
         ]
         read_only_fields = [
             "id",
@@ -861,6 +917,7 @@ class RequestSerializer(serializers.ModelSerializer):
             "created_at",
             "leave_hours",
             "leave_deducted",
+            "uniform_delivery",
         ]
 
     def validate(self, attrs):
@@ -873,7 +930,132 @@ class RequestSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError("يجب تحديد تاريخ ووقت البداية والنهاية للإجازة")
             if leave_start >= leave_end:
                 raise serializers.ValidationError("تاريخ نهاية الإجازة يجب أن يكون بعد تاريخ البداية")
+        if request_type == 'uniform':
+            items_raw = self.initial_data.get('uniform_items')
+            if not items_raw:
+                raise serializers.ValidationError({'uniform_items': "يرجى تحديد القطع المطلوبة."})
+            if not isinstance(items_raw, list):
+                raise serializers.ValidationError({'uniform_items': "صيغة غير صحيحة لقائمة القطع."})
+
+            cleaned_items = []
+            for idx, item in enumerate(items_raw):
+                if not isinstance(item, dict):
+                    raise serializers.ValidationError({'uniform_items': f"البيان رقم {idx + 1} غير صالح."})
+                raw_item_id = item.get('item_id') or item.get('item')
+                if not raw_item_id:
+                    raise serializers.ValidationError({'uniform_items': f"يرجى تحديد القطعة للعنصر رقم {idx + 1}."})
+                try:
+                    item_id = uuid.UUID(str(raw_item_id))
+                except (TypeError, ValueError):
+                    raise serializers.ValidationError({'uniform_items': f"معرّف القطعة غير صالح ({raw_item_id})."})
+
+                raw_quantity = item.get('quantity', 1)
+                try:
+                    quantity = int(raw_quantity)
+                except (TypeError, ValueError):
+                    raise serializers.ValidationError({'uniform_items': f"الكمية غير صالحة للعنصر رقم {idx + 1}."})
+                if quantity <= 0:
+                    raise serializers.ValidationError({'uniform_items': f"الكمية يجب أن تكون أكبر من صفر (العنصر رقم {idx + 1})."})
+
+                cleaned_items.append({
+                    'item_id': item_id,
+                    'quantity': quantity,
+                    'notes': (item.get('notes') or '').strip(),
+                })
+
+            payment_method = (self.initial_data.get('payment_method') or 'deduction').strip()
+            valid_methods = {choice[0] for choice in UniformDelivery.PAYMENT_METHOD_CHOICES}
+            if payment_method not in valid_methods:
+                raise serializers.ValidationError({'payment_method': "طريقة الدفع غير مدعومة."})
+
+            location_id = self.initial_data.get('uniform_location_id')
+            location_uuid = None
+            if location_id:
+                try:
+                    location_uuid = uuid.UUID(str(location_id))
+                except (TypeError, ValueError):
+                    raise serializers.ValidationError({'uniform_location_id': "معرّف الموقع غير صالح."})
+
+            self._uniform_payload = {
+                'items': cleaned_items,
+                'payment_method': payment_method,
+                'location_id': location_uuid,
+            }
+        else:
+            self._uniform_payload = None
         return attrs
+
+    def create(self, validated_data):
+        employee = validated_data.pop('employee')
+        request_type = validated_data.get('request_type')
+
+        if request_type == 'uniform':
+            payload = getattr(self, '_uniform_payload', None)
+            if not payload:
+                raise serializers.ValidationError({'uniform_items': "يرجى تحديد القطع المطلوبة."})
+
+            with transaction.atomic():
+                location = None
+                location_id = payload.get('location_id')
+                if location_id:
+                    location = Location.objects.filter(id=location_id).first()
+
+                uniform_delivery = UniformDelivery.objects.create(
+                    employee=employee,
+                    location=location,
+                    payment_method=payload['payment_method'],
+                )
+
+                total_value = Decimal('0')
+                for item_data in payload['items']:
+                    uniform_item = UniformItem.objects.filter(id=item_data['item_id']).first()
+                    if not uniform_item:
+                        raise serializers.ValidationError({'uniform_items': "أحد القطع المحددة غير موجود."})
+                    delivery_item = UniformDeliveryItem.objects.create(
+                        delivery=uniform_delivery,
+                        item=uniform_item,
+                        quantity=item_data['quantity'],
+                        notes=item_data['notes'] or '',
+                    )
+                    total_value += delivery_item.value
+
+                if uniform_delivery.total_value != total_value:
+                    uniform_delivery.total_value = total_value
+                    uniform_delivery.save(update_fields=['total_value'])
+
+                description = validated_data.get('description') or "طلب استلام زي"
+
+                return Request.objects.create(
+                    employee=employee,
+                    request_type='uniform',
+                    description=description,
+                    uniform_delivery=uniform_delivery,
+                )
+
+        return Request.objects.create(employee=employee, **validated_data)
+
+    def get_uniform_delivery(self, obj):
+        delivery = getattr(obj, 'uniform_delivery', None)
+        if not delivery:
+            return None
+        return {
+            'id': str(delivery.id),
+            'payment_method': delivery.payment_method,
+            'payment_method_display': delivery.get_payment_method_display(),
+            'total_value': str(delivery.total_value),
+            'delivery_date': delivery.delivery_date.isoformat() if delivery.delivery_date else None,
+            'items': [
+                {
+                    'id': str(item.id),
+                    'item_id': str(item.item_id),
+                    'item_name': item.item.name,
+                    'quantity': item.quantity,
+                    'value': str(item.value),
+                    'notes': item.notes or '',
+                }
+                for item in delivery.items.select_related('item').all()
+            ],
+        }
 
 
 class AdvanceSerializer(serializers.ModelSerializer):

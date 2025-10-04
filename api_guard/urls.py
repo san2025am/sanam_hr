@@ -12,6 +12,9 @@ from api_guard.views import (
     GuardReportListCreateView,
     GuardRequestListCreateView,
     GuardAdvanceListCreateView,
+    GuardTaskListView,
+    GuardTaskUpdateView,
+    GuardUniformItemListView,
     PasswordForgotUsernameView,
     PasswordResetUsernameView,
     ResolveLocationAPIView,
@@ -34,4 +37,7 @@ urlpatterns = [
     path("guards/reports/", GuardReportListCreateView.as_view(), name="guard-reports"),
     path("guards/requests/", GuardRequestListCreateView.as_view(), name="guard-requests"),
     path("guards/advances/", GuardAdvanceListCreateView.as_view(), name="guard-advances"),
+    path("guards/tasks/", GuardTaskListView.as_view(), name="guard-tasks"),
+    path("guards/tasks/<uuid:pk>/", GuardTaskUpdateView.as_view(), name="guard-task-update"),
+    path("guards/uniform-items/", GuardUniformItemListView.as_view(), name="guard-uniform-items"),
 ]

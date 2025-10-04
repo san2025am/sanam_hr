@@ -180,11 +180,17 @@ class EmployeeLocationAssignment(BaseModel):
 
 
 class Task(BaseModel):
-    STATUS_CHOICES = [('new', 'جديدة'), ('in_progress', 'قيد التنفيذ'), ('completed', 'مكتملة')]
+    STATUS_CHOICES = [
+        ('new', 'جديدة'),
+        ('accepted', 'مقبولة'),
+        ('in_progress', 'قيد التنفيذ'),
+        ('completed', 'مكتملة'),
+    ]
 
     title = models.CharField(max_length=200, verbose_name="عنوان المهمة")
     description = models.TextField(verbose_name="وصف المهمة")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='new', verbose_name="الحالة")
+    status_note = models.TextField(blank=True, null=True, verbose_name="ملاحظة الحالة")
     due_date = models.DateTimeField(null=True, blank=True, verbose_name="تاريخ الاستحقاق")
 
     location = models.ForeignKey(Location, on_delete=models.CASCADE, related_name='tasks', verbose_name="الموقع")
@@ -395,6 +401,7 @@ class Request(BaseModel):
         ('leave', 'إجازة'),
         ('transfer', 'نقل'),
         ('materials', 'طلب مواد'),
+        ('uniform', 'طلب زي'),
     ]
     STATUS_CHOICES = [('pending', 'قيد المراجعة'), ('approved', 'تمت الموافقة'), ('rejected', 'مرفوض')]
 
@@ -420,6 +427,14 @@ class Request(BaseModel):
         default=False,
         verbose_name="تم خصم الرصيد",
         help_text="لمنع الخصم المكرر عند تغيير حالة الطلب",
+    )
+    uniform_delivery = models.ForeignKey(
+        'UniformDelivery',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='requests',
+        verbose_name="نموذج الزي المرتبط",
     )
 
     def __str__(self): return f"طلب {self.get_request_type_display()} من {self.employee.full_name}"
