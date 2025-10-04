@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import secrets
+import logging
 from datetime import timedelta
 
 from django.utils import timezone as dj_timezone
@@ -43,6 +44,9 @@ from .services.attendance import close_stale_attendance_for_employee
 
 
 User = get_user_model()
+
+
+logger = logging.getLogger(__name__)
 
 
 _GUARD_ROLE_NAMES_CI = {name.casefold() for name in GUARD_ROLE_NAMES}
@@ -223,9 +227,13 @@ class GuardLoginAndProfileView(APIView):
                 )
                 try:
                     send_email_otp(email, subject, body)
-                except Exception:
+                except Exception as exc:
+                    logger.exception("Failed to dispatch device OTP for user %s", user.pk)
                     challenge.delete(hard=True)
-                    return Response({"detail": "تعذر إرسال رمز التحقق. حاول لاحقًا."}, status=500)
+                    return Response({
+                        "detail": "تعذر إرسال رمز التحقق. يرجى المحاولة لاحقًا أو التواصل مع الإدارة لتوثيق الجهاز.",
+                        "code": "otp_delivery_failed",
+                    }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
                 masked_email = _mask_email(email)
                 return Response({
