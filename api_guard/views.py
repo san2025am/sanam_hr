@@ -5,6 +5,7 @@ import secrets
 import logging
 from datetime import timedelta
 
+from django.conf import settings
 from django.utils import timezone as dj_timezone
 from django.db import transaction
 
@@ -229,6 +230,16 @@ class GuardLoginAndProfileView(APIView):
                     send_email_otp(email, subject, body)
                 except Exception as exc:
                     logger.exception("Failed to dispatch device OTP for user %s", user.pk)
+                    if getattr(settings, "DEBUG_SMS_ECHO", False):
+                        return Response({
+                            "requires_verification": True,
+                            "challenge_id": str(challenge.id),
+                            "detail": "تعذر إرسال البريد الإلكتروني، تم عرض الرمز مباشرة لأغراض الاختبار.",
+                            "destination": "debug",
+                            "delivery": "debug",
+                            "debug_code": code,
+                        }, status=status.HTTP_202_ACCEPTED)
+
                     challenge.delete(hard=True)
                     return Response({
                         "detail": "تعذر إرسال رمز التحقق. يرجى المحاولة لاحقًا أو التواصل مع الإدارة لتوثيق الجهاز.",
