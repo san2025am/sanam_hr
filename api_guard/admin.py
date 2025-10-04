@@ -1,7 +1,9 @@
 # api_guard/admin.py
 
 from django.contrib import admin
+from django.contrib.admin.models import LogEntry
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
+from django.contrib.contenttypes.models import ContentType
 
 from .models import (
     EmployeeShiftAssignment, Role, User, Employee, Location, EmployeeLocationAssignment, Task, Shift,
@@ -43,6 +45,39 @@ class UniformDeliveryItemInline(admin.TabularInline):
     extra = 1
     autocomplete_fields = ['item']
     readonly_fields = ('value',)
+
+
+@admin.register(LogEntry)
+class LogEntryAdmin(admin.ModelAdmin):
+    list_display = ("action_time", "get_action", "user", "object_id", "object_repr", "get_app_model")
+    list_filter = ("action_flag", "content_type")
+    search_fields = ("object_repr", "change_message", "user__username", "user__first_name", "user__last_name")
+    readonly_fields = ("action_time", "user", "content_type", "object_id", "object_repr", "change_message", "action_flag")
+    date_hierarchy = "action_time"
+
+    def get_queryset(self, request):
+        # تضمين content_type لتقليل الاستعلامات
+        return super().get_queryset(request).select_related("user", "content_type")
+
+    def get_action(self, obj):
+        return obj.get_action_flag_display()
+    get_action.short_description = "الإجراء"
+
+    def get_app_model(self, obj):
+        if obj.content_type_id:
+            return obj.content_type.app_label + "." + obj.content_type.model
+        return "-"
+    get_app_model.short_description = "النموذج"
+
+    # لا نسمح بإضافة/تعديل/حذف يدوي لسجلات التدقيق
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 # =========================
 # Users / Roles
