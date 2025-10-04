@@ -8,7 +8,8 @@ from .models import (
     AttendanceRecord, Salary, Report, ReportAttachment, Request, EmployeeLeaveBalance,
     ViolationRule, EmployeeViolation,  # <-- الجديد بدل Violation
     Contract, Advance, Custody, LogisticRequest,
-    UniformItem, UniformDelivery, UniformDeliveryItem
+    UniformItem, UniformDelivery, UniformDeliveryItem,
+    TrustedDevice, DeviceLoginChallenge
 )
 from django import forms
 from django.core.exceptions import ValidationError
@@ -348,6 +349,31 @@ class UniformDeliveryAdmin(admin.ModelAdmin):
     readonly_fields = ('total_value',)
     autocomplete_fields = ('employee', 'location',
                            'operations_manager_signature', 'operations_assistant_signature')
+
+
+# =========================
+# Device Security
+# =========================
+
+@admin.register(TrustedDevice)
+class TrustedDeviceAdmin(admin.ModelAdmin):
+    list_display = ('user', 'device_name', 'device_hash', 'first_seen_at', 'last_seen_at')
+    search_fields = ('user__username', 'user__employee__full_name', 'device_name', 'device_hash')
+    list_filter = ('first_seen_at', 'last_seen_at')
+    autocomplete_fields = ('user',)
+    readonly_fields = ('first_seen_at', 'last_seen_at')
+    ordering = ('-last_seen_at',)
+
+
+@admin.register(DeviceLoginChallenge)
+class DeviceLoginChallengeAdmin(admin.ModelAdmin):
+    list_display = ('user', 'device_name', 'device_hash', 'expires_at', 'attempts', 'verified_at')
+    search_fields = ('user__username', 'user__employee__full_name', 'device_name', 'device_hash')
+    list_filter = ('verified_at', 'expires_at')
+    autocomplete_fields = ('user',)
+    readonly_fields = ('verified_at',)
+    ordering = ('-expires_at',)
+
 
 class EmployeeLocationAssignmentForm(forms.ModelForm):
     class Meta:

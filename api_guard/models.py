@@ -623,9 +623,6 @@ class UniformDeliveryItem(BaseModel):
         verbose_name_plural = "بنود نماذج الاستلام"
 
 
-from django.contrib.auth import get_user_model
-
-User = get_user_model()
 
 
 class TrustedDevice(BaseModel):

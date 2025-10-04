@@ -16,7 +16,16 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from .models import AttendanceRecord, Employee, Salary, Report, Request, Advance
+from .models import (
+    AttendanceRecord,
+    Employee,
+    Salary,
+    Report,
+    Request,
+    Advance,
+    TrustedDevice,
+    DeviceLoginChallenge,
+)
 from .serializers import (
     GUARD_ROLE_NAMES,
     ReportSerializer,
@@ -25,12 +34,11 @@ from .serializers import (
     ResolveLocationSerializer,
     AttendanceCheckSerializer,
     GuardTokenObtainPairSerializer,
-    ReportSerializer,
-    RequestSerializer,
     UsernameForgotSerializer,
     UsernameResetSerializer,
     EmployeeMeSerializer,
 )
+from .emailer import send_email_otp
 from .services.attendance import close_stale_attendance_for_employee
 
 
@@ -38,6 +46,31 @@ User = get_user_model()
 
 
 _GUARD_ROLE_NAMES_CI = {name.casefold() for name in GUARD_ROLE_NAMES}
+
+
+def _device_hash(raw_id: str) -> str:
+    normalized = (raw_id or "").strip()
+    if not normalized:
+        return ""
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _hash_code(code: str) -> str:
+    return hashlib.sha256((code or "").encode("utf-8")).hexdigest()
+
+
+def _mask_email(email: str) -> str:
+    if not email or "@" not in email:
+        return email or ""
+    local, domain = email.split("@", 1)
+    local = local.strip()
+    if not local:
+        return f"***@{domain}"
+    if len(local) <= 2:
+        masked_local = local[0] + "*" * max(len(local) - 1, 0)
+    else:
+        masked_local = f"{local[0]}{'*' * (len(local) - 2)}{local[-1]}"
+    return f"{masked_local}@{domain}"
 
 
 def _require_guard_employee(user):
