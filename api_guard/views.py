@@ -126,6 +126,17 @@ def _ensure_trusted_device(*, user, device_hash: str, device_name: str, now, def
         raise
 
 
+def _enforce_single_trusted_device(*, user, active_device_hash: str, now) -> None:
+    others_qs = (TrustedDevice.all_objects
+                 .filter(user=user)
+                 .exclude(device_hash=active_device_hash))
+    if not others_qs.exists():
+        return
+    alive_qs = others_qs.filter(deleted_at__isnull=True)
+    if alive_qs.exists():
+        alive_qs.update(deleted_at=now, updated_at=now)
+
+
 def _require_guard_employee(user):
     role_name = (getattr(getattr(user, "role", None), "name", "") or "").strip()
     if role_name.casefold() not in _GUARD_ROLE_NAMES_CI:
@@ -218,8 +229,10 @@ class GuardLoginAndProfileView(APIView):
         trusted_devices_qs = TrustedDevice.objects.filter(user=user)
         trusted_entry = trusted_devices_qs.filter(device_hash=device_hash).first()
 
+        active_trusted_device = None
+
         if not trusted_devices_qs.exists():
-            _ensure_trusted_device(
+            active_trusted_device = _ensure_trusted_device(
                 user=user,
                 device_hash=device_hash,
                 device_name=device_name,
@@ -227,7 +240,7 @@ class GuardLoginAndProfileView(APIView):
                 default_name="الجهاز الرئيسي",
             )
         elif trusted_entry:
-            _ensure_trusted_device(
+            active_trusted_device = _ensure_trusted_device(
                 user=user,
                 device_hash=device_hash,
                 device_name=device_name,
@@ -261,7 +274,7 @@ class GuardLoginAndProfileView(APIView):
                     challenge.device_name = device_name
                 challenge.save(update_fields=["verified_at", "device_name", "updated_at"])
 
-                _ensure_trusted_device(
+                active_trusted_device = _ensure_trusted_device(
                     user=user,
                     device_hash=device_hash,
                     device_name=device_name or challenge.device_name,
@@ -320,6 +333,13 @@ class GuardLoginAndProfileView(APIView):
                     "destination": masked_email,
                     "delivery": "email",
                 }, status=202)
+
+        if active_trusted_device:
+            _enforce_single_trusted_device(
+                user=user,
+                active_device_hash=active_trusted_device.device_hash,
+                now=now,
+            )
 
         emp_data = EmployeeMeSerializer(employee).data
         refresh = RefreshToken.for_user(user)
