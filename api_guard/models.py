@@ -1,10 +1,15 @@
 # api_guard/models.py
 
-from django.db import models
+from datetime import datetime, date
+from decimal import Decimal, ROUND_HALF_UP
+
+from django.db import models, transaction
 from django.contrib.auth.models import AbstractUser
-from django.db.models.signals import post_save
+from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 from django.db.models import F
+from django.core.exceptions import ValidationError
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.utils import timezone
 
 from core.models import BaseModel
@@ -103,6 +108,14 @@ class Employee(BaseModel):
         max_length=20, choices=SAUDI_BANK_CHOICES, null=True, blank=True, verbose_name="اسم البنك"
     )
     bank_account = models.CharField(max_length=50, blank=True, null=True, verbose_name="رقم الحساب / الآيبان")
+
+    monthly_leave_quota_hours = models.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        default=0,
+        verbose_name="ساعات الإجازة المسموح بها شهرياً",
+        help_text="عدد الساعات المتاحة للإجازات في كل شهر"
+    )
 
     # تعليمات
     instructions = models.TextField(blank=True, null=True, verbose_name="تعليمات خاصة بالموظف")
@@ -297,6 +310,46 @@ class Salary(BaseModel):
         verbose_name_plural = "8. الرواتب"
         ordering = ['-pay_date']
 
+
+class EmployeeLeaveBalance(BaseModel):
+    employee = models.ForeignKey(
+        Employee,
+        on_delete=models.CASCADE,
+        related_name='leave_balances',
+        verbose_name="الموظف",
+    )
+    year = models.PositiveSmallIntegerField(verbose_name="السنة", validators=[MinValueValidator(2000)])
+    month = models.PositiveSmallIntegerField(
+        verbose_name="الشهر",
+        validators=[MinValueValidator(1), MaxValueValidator(12)],
+    )
+    quota_hours = models.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        default=0,
+        verbose_name="ساعات الإجازة المسموحة",
+    )
+    used_hours = models.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        default=0,
+        verbose_name="ساعات الإجازة المستخدمة",
+    )
+
+    class Meta:
+        verbose_name = "رصيد إجازة شهري"
+        verbose_name_plural = "أرصدة الإجازات الشهرية"
+        unique_together = ('employee', 'year', 'month')
+        ordering = ['-year', '-month']
+
+    def __str__(self):
+        return f"رصيد {self.employee.full_name} لشهر {self.month}/{self.year}"
+
+    @property
+    def remaining_hours(self):
+        remaining = (self.quota_hours or Decimal('0')) - (self.used_hours or Decimal('0'))
+        return max(Decimal('0'), remaining)
+
 # ===================================================================
 # 4) التقارير والطلبات
 # ===================================================================
@@ -337,7 +390,12 @@ class ReportAttachment(BaseModel):
 
 
 class Request(BaseModel):
-    REQUEST_TYPE_CHOICES = [('coverage', 'تغطية'), ('transfer', 'نقل'), ('materials', 'طلب مواد')]
+    REQUEST_TYPE_CHOICES = [
+        ('coverage', 'تغطية'),
+        ('leave', 'إجازة'),
+        ('transfer', 'نقل'),
+        ('materials', 'طلب مواد'),
+    ]
     STATUS_CHOICES = [('pending', 'قيد المراجعة'), ('approved', 'تمت الموافقة'), ('rejected', 'مرفوض')]
 
     employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name='requests', verbose_name="صاحب الطلب")
@@ -348,6 +406,21 @@ class Request(BaseModel):
                                  related_name='approved_requests', verbose_name="الموافق/الرافض")
     approval_notes = models.TextField(blank=True, null=True, verbose_name="ملاحظات على القرار")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="وقت الإنشاء")
+
+    leave_start = models.DateTimeField(null=True, blank=True, verbose_name="وقت بداية الإجازة")
+    leave_end = models.DateTimeField(null=True, blank=True, verbose_name="وقت نهاية الإجازة")
+    leave_hours = models.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        verbose_name="عدد ساعات الإجازة",
+    )
+    leave_deducted = models.BooleanField(
+        default=False,
+        verbose_name="تم خصم الرصيد",
+        help_text="لمنع الخصم المكرر عند تغيير حالة الطلب",
+    )
 
     def __str__(self): return f"طلب {self.get_request_type_display()} من {self.employee.full_name}"
 
@@ -437,6 +510,11 @@ class Advance(BaseModel):
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending', verbose_name="الحالة")
     requested_at = models.DateTimeField(auto_now_add=True, verbose_name="تاريخ الطلب")
     approved_at = models.DateTimeField(null=True, blank=True, verbose_name="تاريخ الموافقة")
+    deduction_applied = models.BooleanField(
+        default=False,
+        verbose_name="تم خصم السلفة من الراتب",
+        help_text="علم إذا تم تحديث خصومات الراتب بهذه السلفة",
+    )
 
     def __str__(self): return f"سلفة بقيمة {self.amount} للموظف {self.employee.full_name}"
 
@@ -638,3 +716,266 @@ def apply_salary_deduction_for_uniform(sender, instance, created, **kwargs):
         salary.deductions = F('deductions') + instance.total_value
         salary.save()
         print(f"تمت إضافة خصم بقيمة {instance.total_value} إلى راتب الموظف {instance.employee.full_name}")
+
+
+TWO_DECIMAL_PLACES = Decimal('0.01')
+
+
+def _quantize_hours(value: Decimal | float | int | None) -> Decimal | None:
+    if value is None:
+        return None
+    if not isinstance(value, Decimal):
+        value = Decimal(str(value))
+    return value.quantize(TWO_DECIMAL_PLACES, rounding=ROUND_HALF_UP)
+
+
+def _get_leave_balance(employee: Employee, dt) -> tuple[EmployeeLeaveBalance, bool]:
+    if dt is None:
+        raise ValidationError("تاريخ الإجازة غير معروف")
+    quota = _quantize_hours(employee.monthly_leave_quota_hours or Decimal('0'))
+    defaults = {
+        'quota_hours': quota or Decimal('0'),
+        'used_hours': Decimal('0'),
+    }
+    balance, created = EmployeeLeaveBalance.objects.get_or_create(
+        employee=employee,
+        year=dt.year,
+        month=dt.month,
+        defaults=defaults,
+    )
+    if quota is not None and balance.quota_hours != quota:
+        balance.quota_hours = quota
+        balance.save(update_fields=['quota_hours'])
+    return balance, created
+
+
+def _month_floor(dt: datetime | date) -> date:
+    if isinstance(dt, datetime):
+        return date(dt.year, dt.month, 1)
+    return date(dt.year, dt.month, 1)
+
+
+def _iter_months(start: date, end: date):
+    current = date(start.year, start.month, 1)
+    end_point = date(end.year, end.month, 1)
+    while current <= end_point:
+        yield current
+        if current.month == 12:
+            current = date(current.year + 1, 1, 1)
+        else:
+            current = date(current.year, current.month + 1, 1)
+
+
+def _ensure_leave_balances(employee: Employee, upto_dt: datetime | date) -> list[EmployeeLeaveBalance]:
+    hire_date = employee.hire_date
+    if not hire_date:
+        raise ValidationError("يجب تحديد تاريخ التعيين للموظف قبل احتساب الإجازات")
+
+    target = _month_floor(upto_dt)
+    start = date(hire_date.year, hire_date.month, 1)
+    if start > target:
+        start = target
+
+    balances: list[EmployeeLeaveBalance] = []
+    for month_date in _iter_months(start, target):
+        balance, _ = _get_leave_balance(employee, month_date)
+        balances.append(balance)
+    return balances
+
+
+@receiver(pre_save, sender=Request)
+def prepare_leave_request(sender, instance: Request, **kwargs):
+    instance._old_status = None
+    instance._old_leave_hours = Decimal('0')
+    instance._old_leave_start = None
+
+    if instance.pk:
+        try:
+            previous = Request.objects.get(pk=instance.pk)
+        except Request.DoesNotExist:
+            previous = None
+        if previous:
+            instance._old_status = previous.status
+            instance._old_leave_hours = previous.leave_hours or Decimal('0')
+            instance._old_leave_start = previous.leave_start
+
+    if instance.request_type != 'leave':
+        instance.leave_start = None
+        instance.leave_end = None
+        instance.leave_hours = None
+        instance.leave_deducted = False
+        return
+
+    if instance.leave_start and instance.leave_end:
+        duration = instance.leave_end - instance.leave_start
+        total_seconds = duration.total_seconds()
+        if total_seconds <= 0:
+            raise ValidationError("وقت نهاية الإجازة يجب أن يكون بعد وقت البداية")
+        hours = _quantize_hours(Decimal(str(total_seconds)) / Decimal('3600'))
+        instance.leave_hours = hours
+    else:
+        instance.leave_hours = None
+
+    if instance.status == 'approved':
+        if not instance.leave_start or not instance.leave_end:
+            raise ValidationError("يجب تحديد وقت البداية والنهاية للإجازة قبل الموافقة")
+        if not instance.leave_hours or instance.leave_hours <= 0:
+            raise ValidationError("مدة الإجازة غير صالحة")
+
+        balance, _ = _get_leave_balance(instance.employee, instance.leave_start)
+
+        used_without_current = balance.used_hours or Decimal('0')
+        if instance._old_status == 'approved':
+            used_without_current -= instance._old_leave_hours or Decimal('0')
+            if used_without_current < 0:
+                used_without_current = Decimal('0')
+
+        projected = used_without_current + (instance.leave_hours or Decimal('0'))
+        quota = balance.quota_hours or Decimal('0')
+        if quota <= 0:
+            raise ValidationError("لا يوجد رصيد إجازات شهري محدد لهذا الموظف")
+        if projected - quota > Decimal('0.0001'):
+            remaining = _quantize_hours(quota - used_without_current) or Decimal('0')
+            raise ValidationError(
+                f"رصيد الإجازة المتبقي ({remaining} ساعة) لا يكفي لتغطية هذه الإجازة"
+            )
+
+        cumulative_balances = _ensure_leave_balances(instance.employee, instance.leave_start)
+        total_quota = sum((b.quota_hours or Decimal('0')) for b in cumulative_balances)
+        total_used = sum((b.used_hours or Decimal('0')) for b in cumulative_balances)
+        if instance._old_status == 'approved':
+            total_used -= instance._old_leave_hours or Decimal('0')
+            if total_used < 0:
+                total_used = Decimal('0')
+
+        projected_total = total_used + (instance.leave_hours or Decimal('0'))
+        if projected_total - total_quota > Decimal('0.0001'):
+            remaining_total = _quantize_hours(total_quota - total_used) or Decimal('0')
+            raise ValidationError(
+                f"إجمالي رصيد الإجازات المتاح ({remaining_total} ساعة) لا يكفي لتغطية هذه الإجازة"
+            )
+
+
+@receiver(post_save, sender=Request)
+def sync_leave_balance(sender, instance: Request, created, **kwargs):
+    if instance.request_type != 'leave':
+        if instance.leave_deducted:
+            type(instance).objects.filter(pk=instance.pk).update(leave_deducted=False)
+        return
+
+    new_hours = instance.leave_hours or Decimal('0')
+    old_status = getattr(instance, '_old_status', None)
+    old_hours = getattr(instance, '_old_leave_hours', Decimal('0'))
+    old_start = getattr(instance, '_old_leave_start', None)
+
+    if instance.status == 'approved' and instance.leave_start:
+        with transaction.atomic():
+            balance, _ = _get_leave_balance(instance.employee, instance.leave_start)
+            used = balance.used_hours or Decimal('0')
+            if instance.leave_deducted and old_status == 'approved':
+                delta = new_hours - old_hours
+            elif instance.leave_deducted and old_status != 'approved':
+                delta = new_hours
+            elif old_status == 'approved':
+                delta = new_hours - old_hours
+            else:
+                delta = new_hours
+
+            if delta:
+                balance.used_hours = _quantize_hours(used + delta) or Decimal('0')
+                if balance.used_hours < 0:
+                    balance.used_hours = Decimal('0')
+                balance.save(update_fields=['used_hours'])
+
+        if not instance.leave_deducted:
+            type(instance).objects.filter(pk=instance.pk).update(leave_deducted=True)
+
+    elif instance.leave_deducted:
+        target_start = old_start or instance.leave_start
+        if target_start:
+            with transaction.atomic():
+                balance, _ = _get_leave_balance(instance.employee, target_start)
+                used = balance.used_hours or Decimal('0')
+                refund = old_hours or new_hours
+                if refund:
+                    balance.used_hours = _quantize_hours(used - refund) or Decimal('0')
+                    if balance.used_hours < 0:
+                        balance.used_hours = Decimal('0')
+                    balance.save(update_fields=['used_hours'])
+
+        type(instance).objects.filter(pk=instance.pk).update(leave_deducted=False)
+
+
+def _quantize_currency(value: Decimal | float | int | None) -> Decimal | None:
+    if value is None:
+        return None
+    if not isinstance(value, Decimal):
+        value = Decimal(str(value))
+    return value.quantize(TWO_DECIMAL_PLACES, rounding=ROUND_HALF_UP)
+
+
+@receiver(pre_save, sender=Advance)
+def validate_advance(sender, instance: Advance, **kwargs):
+    instance._old_status = None
+    instance._old_amount = Decimal('0')
+
+    if instance.pk:
+        try:
+            previous = Advance.objects.get(pk=instance.pk)
+        except Advance.DoesNotExist:
+            previous = None
+        if previous:
+            instance._old_status = previous.status
+            instance._old_amount = previous.amount or Decimal('0')
+
+    amount = _quantize_currency(instance.amount)
+    if not amount or amount <= 0:
+        raise ValidationError("قيمة السلفة يجب أن تكون أكبر من صفر")
+    instance.amount = amount
+
+    salary, _ = Salary.objects.get_or_create(employee=instance.employee)
+    base_salary = _quantize_currency(salary.base_salary)
+    if not base_salary or base_salary <= 0:
+        raise ValidationError("لا يمكن طلب السلفة قبل تحديد الراتب الأساسي")
+
+    max_allowed = _quantize_currency(base_salary * Decimal('0.20'))
+    if max_allowed is None or amount - max_allowed > Decimal('0.0001'):
+        raise ValidationError(
+            f"قيمة السلفة تتجاوز الحد المسموح (20% من الراتب: {max_allowed} ريال)"
+        )
+
+    if instance.status == 'approved':
+        hire_date = instance.employee.hire_date
+        if not hire_date:
+            raise ValidationError("يجب تحديد تاريخ التعيين للموظف قبل الموافقة على السلفة")
+        days_worked = (timezone.now().date() - hire_date).days
+        if days_worked < 30:
+            raise ValidationError("لا يمكن الموافقة على السلفة قبل إكمال شهر عمل كامل")
+        if not instance.approved_at:
+            instance.approved_at = timezone.now()
+    else:
+        instance.approved_at = instance.approved_at if instance.pk else None
+
+
+@receiver(post_save, sender=Advance)
+def sync_advance_deduction(sender, instance: Advance, created, **kwargs):
+    old_status = getattr(instance, '_old_status', None)
+    old_amount = getattr(instance, '_old_amount', Decimal('0'))
+
+    new_effective = instance.amount if instance.status == 'approved' else Decimal('0')
+    old_effective = old_amount if old_status == 'approved' else Decimal('0')
+    delta = _quantize_currency(new_effective - old_effective) or Decimal('0')
+
+    if delta:
+        with transaction.atomic():
+            salary, _ = Salary.objects.select_for_update().get_or_create(employee=instance.employee)
+            current = _quantize_currency(salary.deductions) or Decimal('0')
+            updated = current + delta
+            if updated < 0:
+                updated = Decimal('0')
+            salary.deductions = _quantize_currency(updated)
+            salary.save(update_fields=['deductions'])
+
+    should_flag = instance.status == 'approved'
+    if instance.deduction_applied != should_flag:
+        type(instance).objects.filter(pk=instance.pk).update(deduction_applied=should_flag)

@@ -1,6 +1,7 @@
 @base = http://127.0.0.1:8000
 @prefix = api/v1
 @json = application/json
+@guard_token = <ACCESS_TOKEN>
 
 ### Guard login
 POST {{base}}/{{prefix}}/auth/guard/login/
@@ -26,6 +27,71 @@ Content-Type: {{json}}
 
 { "session_id": 17, "code": "486028", "new_password": "As@123456" }
 
-GET http://127.0.0.1:8000/api/v1/auth/guard/3/profile/?include=locations,attendance,tasks,reports,requests,violations,uniforms,salary&limit=10&days=60
-Authorization: Bearer <ACCESS_TOKEN>
+### Guard profile snapshot
+GET {{base}}/{{prefix}}/auth/guard/3/profile/?include=locations,attendance,tasks,reports,requests,violations,uniforms,salary&limit=10&days=60
+Authorization: Bearer {{guard_token}}
 
+### Guard requests list (latest first)
+GET {{base}}/{{prefix}}/guards/requests/
+Authorization: Bearer {{guard_token}}
+
+### Create leave request
+POST {{base}}/{{prefix}}/guards/requests/
+Content-Type: {{json}}
+Authorization: Bearer {{guard_token}}
+
+{
+  "request_type": "leave",
+  "description": "طلب إجازة يومين",
+  "leave_start": "2025-10-01T08:00:00Z",
+  "leave_end": "2025-10-03T08:00:00Z"
+}
+
+### Guard reports list
+GET {{base}}/{{prefix}}/guards/reports/
+Authorization: Bearer {{guard_token}}
+
+### Create daily report
+POST {{base}}/{{prefix}}/guards/reports/
+Content-Type: {{json}}
+Authorization: Bearer {{guard_token}}
+
+{
+  "report_type": "daily",
+  "description": "جولة الموقع مكتملة بدون ملاحظات",
+  "location": null
+}
+
+### Create report with photo upload
+POST {{base}}/{{prefix}}/guards/reports/
+Authorization: Bearer {{guard_token}}
+Content-Type: multipart/form-data; boundary=WebAppBoundary
+
+--WebAppBoundary
+Content-Disposition: form-data; name="report_type"
+
+daily
+--WebAppBoundary
+Content-Disposition: form-data; name="description"
+
+تقرير مرفق بصورة من موقع الحراسة
+--WebAppBoundary
+Content-Disposition: form-data; name="upload_attachments"; filename="gate-photo.jpg"
+Content-Type: image/jpeg
+
+< ./samples/gate-photo.jpg
+--WebAppBoundary--
+
+### Guard advances list
+GET {{base}}/{{prefix}}/guards/advances/
+Authorization: Bearer {{guard_token}}
+
+### Create advance request
+POST {{base}}/{{prefix}}/guards/advances/
+Content-Type: {{json}}
+Authorization: Bearer {{guard_token}}
+
+{
+  "amount": 500.00,
+  "reason": "سلفة لظروف طارئة"
+}

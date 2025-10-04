@@ -5,12 +5,7 @@ import secrets
 from datetime import timedelta
 
 from django.utils import timezone as dj_timezone
-from django.contrib.auth import authenticate, get_user_model
-
-from rest_framework import status
-from rest_framework.permissions import IsAuthenticated, AllowAny
 from django.db import transaction
-from datetime import timedelta
 
 from django.contrib.auth import authenticate, get_user_model
 from rest_framework import generics, status
@@ -21,10 +16,13 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from .emailer import send_email_otp
-from .models import AttendanceRecord, Employee, Salary, TrustedDevice, DeviceLoginChallenge
+from .models import AttendanceRecord, Employee, Salary, Report, Request, Advance
 from .serializers import (
     GUARD_ROLE_NAMES,
+    ReportSerializer,
+    RequestSerializer,
+    AdvanceSerializer,
+    ResolveLocationSerializer,
     AttendanceCheckSerializer,
     GuardTokenObtainPairSerializer,
     ReportSerializer,
@@ -32,18 +30,8 @@ from .serializers import (
     UsernameForgotSerializer,
     UsernameResetSerializer,
     EmployeeMeSerializer,
-    AttendanceCheckSerializer,
-    ResolveLocationSerializer,
 )
-
-User = get_user_model()
-
-
-# =========================
-# Auth
-# =========================
-
-from .models import AttendanceRecord, Employee, Salary, Report, ReportAttachment, Request
+from .services.attendance import close_stale_attendance_for_employee
 
 
 User = get_user_model()
@@ -60,29 +48,6 @@ def _require_guard_employee(user):
         return Employee.objects.select_related("user", "user__role").get(user=user)
     except Employee.DoesNotExist as exc:
         raise NotFound("لا يوجد ملف موظف مرتبط بهذا الحساب") from exc
-
-
-def _device_hash(raw: str) -> str:
-    return hashlib.sha256(raw.encode()).hexdigest()
-
-
-def _hash_code(code: str) -> str:
-    return hashlib.sha256(code.encode()).hexdigest()
-
-
-def _mask_email(email: str) -> str:
-    if not email or '@' not in email:
-        return ''
-    local, domain = email.split('@', 1)
-    if not local:
-        return f"*@{domain}"
-    if len(local) == 1:
-        mask = '*'
-    elif len(local) == 2:
-        mask = local[0] + '*'
-    else:
-        mask = local[0] + ('*' * (len(local) - 2)) + local[-1]
-    return f"{mask}@{domain}"
 
 
 class GuardLoginView(TokenObtainPairView):
@@ -297,6 +262,17 @@ class AttendanceCheckAPIView(APIView):
         return Response(payload, status=status.HTTP_200_OK)
 
     def post(self, request):
+        cleanup_employee = (Employee.objects
+                              .select_related("user", "supervisor")
+                              .filter(user=request.user)
+                              .first())
+        if cleanup_employee:
+            close_stale_attendance_for_employee(
+                cleanup_employee,
+                as_of=dj_timezone.now(),
+                notify=True,
+            )
+
         ser = AttendanceCheckSerializer(data=request.data, context={"request": request})
         if not ser.is_valid():
             # صياغة رسالة مفصلة بدل "تحقق من الحقول"
@@ -542,25 +518,7 @@ class GuardReportListCreateView(generics.ListCreateAPIView):
     def perform_create(self, serializer):
         employee = _require_guard_employee(self.request.user)
         with transaction.atomic():
-            report = serializer.save(employee=employee)
-            self._save_attachments(report)
-        return report
-
-    def _save_attachments(self, report):
-        files = self.request.FILES.getlist("attachments")
-        for uploaded in files:
-            ReportAttachment.objects.create(
-                report=report,
-                file=uploaded,
-                file_type=self._detect_file_type(uploaded),
-            )
-
-    @staticmethod
-    def _detect_file_type(uploaded):
-        content_type = (getattr(uploaded, "content_type", "") or "").lower()
-        if content_type.startswith("video/"):
-            return "video"
-        return "image"
+            serializer.save(employee=employee)
 
 
 class GuardRequestListCreateView(generics.ListCreateAPIView):
@@ -577,4 +535,29 @@ class GuardRequestListCreateView(generics.ListCreateAPIView):
 
     def perform_create(self, serializer):
         employee = _require_guard_employee(self.request.user)
+        serializer.save(employee=employee)
+
+
+class GuardAdvanceListCreateView(generics.ListCreateAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = AdvanceSerializer
+
+    def get_queryset(self):
+        employee = _require_guard_employee(self.request.user)
+        return (
+            Advance.objects
+            .filter(employee=employee)
+            .order_by("-requested_at")
+        )
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        try:
+            context["employee"] = _require_guard_employee(self.request.user)
+        except Exception:
+            pass
+        return context
+
+    def perform_create(self, serializer):
+        employee = self.get_serializer_context().get("employee") or _require_guard_employee(self.request.user)
         serializer.save(employee=employee)
