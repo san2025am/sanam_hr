@@ -7,7 +7,7 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.utils import timezone as dj_timezone
-from django.db import transaction
+from django.db import IntegrityError
 
 from django.contrib.auth import authenticate, get_user_model
 from rest_framework import generics, status
@@ -76,6 +76,54 @@ def _mask_email(email: str) -> str:
     else:
         masked_local = f"{local[0]}{'*' * (len(local) - 2)}{local[-1]}"
     return f"{masked_local}@{domain}"
+
+
+def _refresh_existing_trusted_device(instance, *, provided_name: str, now):
+    fields = []
+    if instance.deleted_at is not None:
+        instance.deleted_at = None
+        fields.append("deleted_at")
+    instance.last_seen_at = now
+    fields.append("last_seen_at")
+    current_name = (instance.device_name or "").strip()
+    if provided_name and provided_name != current_name:
+        instance.device_name = provided_name
+        fields.append("device_name")
+    update_fields = list({*fields, "updated_at"})
+    instance.save(update_fields=update_fields)
+    return instance
+
+
+def _ensure_trusted_device(*, user, device_hash: str, device_name: str, now, default_name: str):
+    provided_name = (device_name or "").strip()
+    existing = (TrustedDevice.all_objects
+                .filter(user=user, device_hash=device_hash)
+                .first())
+    if existing:
+        return _refresh_existing_trusted_device(
+            existing,
+            provided_name=provided_name,
+            now=now,
+        )
+
+    create_name = provided_name or (default_name or "")
+    try:
+        return TrustedDevice.objects.create(
+            user=user,
+            device_hash=device_hash,
+            device_name=create_name,
+        )
+    except IntegrityError:
+        existing = (TrustedDevice.all_objects
+                    .filter(user=user, device_hash=device_hash)
+                    .first())
+        if existing:
+            return _refresh_existing_trusted_device(
+                existing,
+                provided_name=provided_name,
+                now=now,
+            )
+        raise
 
 
 def _require_guard_employee(user):
@@ -160,16 +208,21 @@ class GuardLoginAndProfileView(APIView):
         trusted_entry = trusted_devices_qs.filter(device_hash=device_hash).first()
 
         if not trusted_devices_qs.exists():
-            TrustedDevice.objects.create(
+            _ensure_trusted_device(
                 user=user,
                 device_hash=device_hash,
-                device_name=device_name or "الجهاز الرئيسي",
+                device_name=device_name,
+                now=now,
+                default_name="الجهاز الرئيسي",
             )
         elif trusted_entry:
-            updates = {"last_seen_at": now}
-            if device_name and device_name != (trusted_entry.device_name or ""):
-                updates["device_name"] = device_name
-            TrustedDevice.objects.filter(pk=trusted_entry.pk).update(**updates)
+            _ensure_trusted_device(
+                user=user,
+                device_hash=device_hash,
+                device_name=device_name,
+                now=now,
+                default_name=trusted_entry.device_name or device_name or "الجهاز الرئيسي",
+            )
         else:
             if challenge_id and otp_code:
                 try:
@@ -197,10 +250,12 @@ class GuardLoginAndProfileView(APIView):
                     challenge.device_name = device_name
                 challenge.save(update_fields=["verified_at", "device_name", "updated_at"])
 
-                TrustedDevice.objects.create(
+                _ensure_trusted_device(
                     user=user,
                     device_hash=device_hash,
-                    device_name=device_name or challenge.device_name or "جهاز موثّق",
+                    device_name=device_name or challenge.device_name,
+                    now=now,
+                    default_name="جهاز موثّق",
                 )
             else:
                 email = (user.email or "").strip()
