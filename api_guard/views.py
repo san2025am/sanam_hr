@@ -204,6 +204,17 @@ class GuardLoginAndProfileView(APIView):
 
         now = dj_timezone.now()
         device_hash = _device_hash(device_id)
+        other_user_entry = (
+            TrustedDevice.all_objects
+            .filter(device_hash=device_hash)
+            .exclude(user=user)
+            .first()
+        )
+        if other_user_entry:
+            return Response({
+                "detail": "هذا الجهاز مسجل مسبقًا لحساب آخر. يرجى تسجيل الخروج من الحساب السابق أو التواصل مع الإدارة.",
+                "code": "device_used_by_another_user",
+            }, status=status.HTTP_403_FORBIDDEN)
         trusted_devices_qs = TrustedDevice.objects.filter(user=user)
         trusted_entry = trusted_devices_qs.filter(device_hash=device_hash).first()
 
