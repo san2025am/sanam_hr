@@ -216,7 +216,7 @@ class GuardLoginAndProfileView(APIView):
         now = dj_timezone.now()
         device_hash = _device_hash(device_id)
         other_user_entry = (
-            TrustedDevice.all_objects
+            TrustedDevice.objects
             .filter(device_hash=device_hash)
             .exclude(user=user)
             .first()
