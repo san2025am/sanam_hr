@@ -627,6 +627,63 @@ from django.contrib.auth import get_user_model
 
 User = get_user_model()
 
+
+class TrustedDevice(BaseModel):
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="trusted_devices",
+        verbose_name="المستخدم",
+    )
+    device_hash = models.CharField(max_length=128, verbose_name="بصمة الجهاز")
+    device_name = models.CharField(max_length=200, blank=True, verbose_name="اسم الجهاز")
+    first_seen_at = models.DateTimeField(auto_now_add=True, verbose_name="أول ظهور")
+    last_seen_at = models.DateTimeField(auto_now=True, verbose_name="آخر ظهور")
+
+    class Meta:
+        verbose_name = "جهاز موثوق"
+        verbose_name_plural = "الأجهزة الموثوقة"
+        unique_together = ("user", "device_hash")
+
+    def __str__(self):
+        name = self.device_name or "(بدون اسم)"
+        return f"{self.user.username} - {name}"
+
+
+class DeviceLoginChallenge(BaseModel):
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name="device_login_challenges",
+        verbose_name="المستخدم",
+    )
+    device_hash = models.CharField(max_length=128, verbose_name="بصمة الجهاز")
+    device_name = models.CharField(max_length=200, blank=True, verbose_name="اسم الجهاز")
+    code_hash = models.CharField(max_length=128, verbose_name="هاش رمز التحقق")
+    expires_at = models.DateTimeField(verbose_name="ينتهي في")
+    attempts = models.PositiveSmallIntegerField(default=0, verbose_name="عدد المحاولات")
+    verified_at = models.DateTimeField(null=True, blank=True, verbose_name="وقت التوثيق")
+
+    class Meta:
+        verbose_name = "طلب توثيق جهاز"
+        verbose_name_plural = "طلبات توثيق الأجهزة"
+        indexes = [
+            models.Index(fields=["user", "device_hash"]),
+            models.Index(fields=["expires_at"]),
+        ]
+
+    def __str__(self):
+        return f"{self.user.username} - {self.device_name or self.device_hash[:8]}"
+
+    @property
+    def is_verified(self) -> bool:
+        return self.verified_at is not None
+
+    @property
+    def is_expired(self) -> bool:
+        return self.expires_at < timezone.now()
+
+
 class PasswordResetSMS(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="password_resets_sms")
     phone = models.CharField(max_length=32, db_index=True)

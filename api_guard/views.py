@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import secrets
 from datetime import timedelta
 
 from django.utils import timezone as dj_timezone
@@ -23,6 +25,8 @@ from .serializers import (
     ResolveLocationSerializer,
     AttendanceCheckSerializer,
     GuardTokenObtainPairSerializer,
+    ReportSerializer,
+    RequestSerializer,
     UsernameForgotSerializer,
     UsernameResetSerializer,
     EmployeeMeSerializer,
@@ -102,6 +106,103 @@ class GuardLoginAndProfileView(APIView):
         except Employee.DoesNotExist:
             return Response({"detail": "لا يوجد ملف موظف مرتبط بهذا المستخدم"}, status=404)
 
+        device_id = (request.data.get("device_id") or "").strip()
+        device_name = (request.data.get("device_name") or "").strip()
+        challenge_id_raw = request.data.get("challenge_id")
+        otp_code_raw = request.data.get("otp_code")
+        challenge_id = (challenge_id_raw or "").strip()
+        otp_code = (otp_code_raw or "").strip()
+
+        if not device_id:
+            return Response({"detail": "معرّف الجهاز مفقود. يرجى تحديث التطبيق."}, status=400)
+
+        now = dj_timezone.now()
+        device_hash = _device_hash(device_id)
+        trusted_devices_qs = TrustedDevice.objects.filter(user=user)
+        trusted_entry = trusted_devices_qs.filter(device_hash=device_hash).first()
+
+        if not trusted_devices_qs.exists():
+            TrustedDevice.objects.create(
+                user=user,
+                device_hash=device_hash,
+                device_name=device_name or "الجهاز الرئيسي",
+            )
+        elif trusted_entry:
+            updates = {"last_seen_at": now}
+            if device_name and device_name != (trusted_entry.device_name or ""):
+                updates["device_name"] = device_name
+            TrustedDevice.objects.filter(pk=trusted_entry.pk).update(**updates)
+        else:
+            if challenge_id and otp_code:
+                try:
+                    challenge = DeviceLoginChallenge.objects.get(
+                        id=challenge_id,
+                        user=user,
+                        device_hash=device_hash,
+                        verified_at__isnull=True,
+                    )
+                except (DeviceLoginChallenge.DoesNotExist, ValueError):
+                    return Response({"detail": "طلب التحقق غير صالح"}, status=400)
+
+                if challenge.is_expired:
+                    return Response({"detail": "انتهت صلاحية رمز التحقق"}, status=400)
+                if challenge.attempts >= 5:
+                    return Response({"detail": "تم تجاوز عدد المحاولات المسموح بها"}, status=429)
+
+                if _hash_code(otp_code) != challenge.code_hash:
+                    challenge.attempts += 1
+                    challenge.save(update_fields=["attempts", "updated_at"])
+                    return Response({"detail": "رمز التحقق غير صحيح"}, status=400)
+
+                challenge.verified_at = now
+                if device_name and not challenge.device_name:
+                    challenge.device_name = device_name
+                challenge.save(update_fields=["verified_at", "device_name", "updated_at"])
+
+                TrustedDevice.objects.create(
+                    user=user,
+                    device_hash=device_hash,
+                    device_name=device_name or challenge.device_name or "جهاز موثّق",
+                )
+            else:
+                email = (user.email or "").strip()
+                if not email:
+                    return Response({
+                        "detail": "هذا الجهاز غير موثوق ويستلزم التحقق، لكن لا يوجد بريد إلكتروني لإرسال الرمز. يرجى التواصل مع المسؤول لتحديث بياناتك.",
+                        "code": "no_email_available",
+                    }, status=400)
+
+                code = f"{secrets.randbelow(1_000_000):06d}"
+                expires_at = now + timedelta(minutes=10)
+                challenge = DeviceLoginChallenge.objects.create(
+                    user=user,
+                    device_hash=device_hash,
+                    device_name=device_name,
+                    code_hash=_hash_code(code),
+                    expires_at=expires_at,
+                )
+                subject = "رمز توثيق جهاز جديد"
+                body = (
+                    "عزيزي المستخدم،\n\n"
+                    "تم محاولة تسجيل الدخول من جهاز جديد. رمز التحقق الخاص بك هو:\n"
+                    f"{code}\n\n"
+                    "الرمز صالح لمدة 10 دقائق. إذا لم تكن أنت من حاول تسجيل الدخول، يرجى تجاهل هذه الرسالة."
+                )
+                try:
+                    send_email_otp(email, subject, body)
+                except Exception:
+                    challenge.delete(hard=True)
+                    return Response({"detail": "تعذر إرسال رمز التحقق. حاول لاحقًا."}, status=500)
+
+                masked_email = _mask_email(email)
+                return Response({
+                    "requires_verification": True,
+                    "challenge_id": str(challenge.id),
+                    "detail": "هذا الجهاز غير مسجّل ضمن أجهزتك الموثوقة. تم إرسال رمز تحقق إلى بريدك الإلكتروني.",
+                    "destination": masked_email,
+                    "delivery": "email",
+                }, status=202)
+
         emp_data = EmployeeMeSerializer(employee).data
         refresh = RefreshToken.for_user(user)
         access = refresh.access_token
@@ -176,11 +277,21 @@ class AttendanceCheckAPIView(APIView):
         if not ser.is_valid():
             # صياغة رسالة مفصلة بدل "تحقق من الحقول"
             err_text = []
+            nice_hint = None
             for field, msgs in ser.errors.items():
-                if isinstance(msgs, (list, tuple)):
-                    msgs = ", ".join([str(m) for m in msgs])
-                err_text.append(f"{field}: {msgs}")
-            nice = "؛ ".join(err_text) if err_text else "الرجاء التحقق من الحقول المدخلة."
+                final_msgs = []
+                for msg in (msgs if isinstance(msgs, (list, tuple)) else [msgs]):
+                    msg_text = str(msg)
+                    final_msgs.append(msg_text)
+                    final_lower = msg_text.casefold()
+                    if "valid uuid" in final_lower or "uuid" in final_lower:
+                        nice_hint = (
+                            "تعذر تحديد موقع العمل. يرجى التأكد من اختيار الموقع الصحيح"
+                            " أو إعادة محاولة تحديد الموقع تلقائيًا ثم إعادة المحاولة."
+                        )
+                err_text.append(f"{field}: {', '.join(final_msgs)}")
+
+            nice = nice_hint or ("؛ ".join(err_text) if err_text else "الرجاء التحقق من الحقول المدخلة.")
             return Response({
                 "ok": False, "performed": False,
                 "action": request.data.get("action"),
@@ -411,7 +522,6 @@ class GuardReportListCreateView(generics.ListCreateAPIView):
 
 
 class GuardRequestListCreateView(generics.ListCreateAPIView):
-    permission_classes = [IsAuthenticated]
     serializer_class = RequestSerializer
 
     def get_queryset(self):
