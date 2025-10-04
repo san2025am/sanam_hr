@@ -14,18 +14,44 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "t", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    try:
+        return int(raw) if raw is not None else default
+    except (TypeError, ValueError):
+        return default
+
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")  # مهم: يشير لملف .env بجوار manage.py
 
-EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
-EMAIL_HOST = "smtp.gmail.com"
-EMAIL_PORT = 587
-EMAIL_USE_TLS = True
-EMAIL_USE_SSL = False
-EMAIL_HOST_USER = os.getenv("SMTP_USER")
-EMAIL_HOST_PASSWORD = os.getenv("SMTP_PASS")
-DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
-EMAIL_TIMEOUT = 20
+
+EMAIL_BACKEND = os.getenv(
+    "DJANGO_EMAIL_BACKEND",
+    "django.core.mail.backends.smtp.EmailBackend",
+)
+EMAIL_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+EMAIL_USE_SSL = _env_bool("SMTP_USE_SSL", False)
+EMAIL_USE_TLS = _env_bool("SMTP_USE_TLS", not EMAIL_USE_SSL)
+if EMAIL_USE_SSL:
+    EMAIL_USE_TLS = False  # لا يمكن تفعيل كليهما معًا
+EMAIL_PORT = _env_int("SMTP_PORT", 465 if EMAIL_USE_SSL else 587)
+EMAIL_HOST_USER = os.getenv("SMTP_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("SMTP_PASS", "")
+EMAIL_TIMEOUT = _env_int("SMTP_TIMEOUT", 20)
+
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", EMAIL_HOST_USER or "no-reply@sanam.local")
+SERVER_EMAIL = os.getenv("SERVER_EMAIL", DEFAULT_FROM_EMAIL)
+EMAIL_SUBJECT_PREFIX = os.getenv("EMAIL_SUBJECT_PREFIX", "[Sanam] ")
+EMAIL_REPLY_TO = os.getenv("DEFAULT_REPLY_TO")
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
