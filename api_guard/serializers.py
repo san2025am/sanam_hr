@@ -1112,3 +1112,21 @@ class AdvanceSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("يجب إكمال شهر عمل كامل قبل طلب السلفة")
 
         return attrs
+    
+  
+class AttendanceMiniSerializer(serializers.ModelSerializer):
+    location_name = serializers.CharField(source="location.name", read_only=True)
+
+    class Meta:
+        model = AttendanceRecord
+        fields = [
+            "id",
+            "employee_id",
+            "check_in_time",
+            "check_out_time",
+            "early_checkout",
+            "location_id",
+            "location_name",
+            "updated_at",
+        ]
+

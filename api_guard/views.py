@@ -32,6 +32,7 @@ from .models import (
 )
 from .serializers import (
     GUARD_ROLE_NAMES,
+    AttendanceMiniSerializer,
     ReportSerializer,
     RequestSerializer,
     AdvanceSerializer,
@@ -785,3 +786,45 @@ class GuardUniformItemListView(APIView):
             for item in items
         ]
         return Response({'results': data}, status=status.HTTP_200_OK)
+
+
+
+class AttendanceLastForMeView(APIView):
+    """
+    GET /api/v1/attendance/last/
+    يعيد آخر سجل حضور/انصراف للموظف الحالي (حسب التوكن).
+    200 مع البيانات | 204 إذا لا يوجد أي سجل
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        # جلب الموظف المرتبط بالمستخدم الحالي
+        try:
+            emp = Employee.objects.get(user=request.user)
+        except Employee.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        rec = (AttendanceRecord.objects
+               .filter(employee=emp)
+               .select_related("location")
+               .order_by("-updated_at", "-id")
+               .first())
+
+        if not rec:
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
+        data = AttendanceMiniSerializer(rec).data
+        return Response(data, status=status.HTTP_200_OK)
+
+
+class AttendanceExistsView(APIView):
+    """
+    GET /api/v1/attendance/exists/<uuid:pk>/
+    204: موجود
+    404: غير موجود (محذوف/غير صحيح)
+    """
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, pk):
+        exists = AttendanceRecord.objects.filter(id=pk).exists()
+        return Response(status=status.HTTP_204_NO_CONTENT if exists else status.HTTP_404_NOT_FOUND)
