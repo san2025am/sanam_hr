@@ -11,6 +11,10 @@ from django.conf import settings
 from django.core.mail import send_mail
 from django.utils import timezone as dj_timezone
 from django.db import IntegrityError
+from django.db.models import OuterRef, Subquery
+from django.http import JsonResponse
+from django.shortcuts import render
+from django.contrib.admin.views.decorators import staff_member_required
 
 from django.contrib.auth import authenticate, get_user_model
 from rest_framework import generics, status
@@ -24,6 +28,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from .models import (
     AttendanceRecord,
     Employee,
+    Location,
     Salary,
     Task,
     Report,
@@ -197,6 +202,12 @@ def record_geofence_violation(
         outside_minutes=outside_minutes,
     )
     return violation
+
+
+def _purge_location_pings_for_employee(employee: Employee) -> None:
+    if not employee:
+        return
+    LocationPing.objects.filter(employee=employee, violation_triggered=False).delete()
 
 
 _GUARD_ROLE_NAMES_CI = {name.casefold() for name in GUARD_ROLE_NAMES}
@@ -754,6 +765,8 @@ class AttendanceCheckAPIView(APIView):
                     )
                     violation_escalated = True
 
+            _purge_location_pings_for_employee(employee)
+
             return Response({
                 "ok": True,
                 "performed": True,
@@ -839,6 +852,8 @@ class AttendanceCheckAPIView(APIView):
                         attendance_record=rec,
                     )
                     violation_escalated = True
+
+            _purge_location_pings_for_employee(employee)
 
             return Response({
                 "ok": True,
@@ -1027,6 +1042,100 @@ class LocationPingAPIView(APIView):
             "recorded_at": recorded_at.isoformat(),
         }
         return Response(data, status=status.HTTP_200_OK)
+
+
+@staff_member_required
+def location_dashboard_view(request):
+    return render(
+        request,
+        "api_guard/location_dashboard.html",
+        {
+            "warning_minutes": GEOFENCE_WARNING_MINUTES,
+        },
+    )
+
+
+@staff_member_required
+def location_dashboard_feed(request):
+    latest_ping = LocationPing.objects.filter(employee=OuterRef("pk")).order_by("-recorded_at")
+
+    employees = (
+        Employee.objects
+        .select_related("user", "supervisor")
+        .prefetch_related("locations")
+        .annotate(
+            last_ping_at=Subquery(latest_ping.values("recorded_at")[:1]),
+            last_lat=Subquery(latest_ping.values("latitude")[:1]),
+            last_lng=Subquery(latest_ping.values("longitude")[:1]),
+            last_accuracy=Subquery(latest_ping.values("accuracy")[:1]),
+            last_distance=Subquery(latest_ping.values("distance_m")[:1]),
+            last_within=Subquery(latest_ping.values("within_radius")[:1]),
+            last_violation=Subquery(latest_ping.values("violation_triggered")[:1]),
+            last_location_id=Subquery(latest_ping.values("location_id")[:1]),
+        )
+    )
+
+    location_ids = {emp.last_location_id for emp in employees if getattr(emp, "last_location_id", None)}
+    locations_map = {loc.id: loc for loc in Location.objects.filter(id__in=location_ids)}
+
+    now = dj_timezone.now()
+    results = []
+    for emp in employees:
+        last_recorded = getattr(emp, "last_ping_at", None)
+        last_lat = getattr(emp, "last_lat", None)
+        last_lng = getattr(emp, "last_lng", None)
+        if last_recorded is None and last_lat is None and last_lng is None:
+            continue
+
+        minutes_since = None
+        if last_recorded:
+            minutes_since = round((now - last_recorded).total_seconds() / 60.0, 1)
+
+        loc = locations_map.get(getattr(emp, "last_location_id", None))
+        loc_center = None
+        loc_radius = None
+        if loc:
+            if loc.gps_coordinates:
+                try:
+                    lat_c, lng_c = [float(x.strip()) for x in loc.gps_coordinates.split(",", 1)]
+                    loc_center = {"lat": lat_c, "lng": lng_c}
+                except Exception:
+                    loc_center = None
+            if loc.gps_radius:
+                try:
+                    loc_radius = float(loc.gps_radius)
+                except Exception:
+                    loc_radius = None
+
+        results.append({
+            "employee_id": emp.id,
+            "employee_name": emp.full_name,
+            "phone": emp.phone_number,
+            "supervisor": getattr(emp.supervisor, "full_name", None),
+            "last_ping": {
+                "recorded_at": last_recorded.isoformat() if last_recorded else None,
+                "latitude": last_lat,
+                "longitude": last_lng,
+                "accuracy": getattr(emp, "last_accuracy", None),
+                "distance_m": getattr(emp, "last_distance", None),
+                "within_radius": getattr(emp, "last_within", None),
+                "violation_triggered": getattr(emp, "last_violation", None),
+                "minutes_since": minutes_since,
+            },
+            "location": {
+                "id": getattr(loc, "id", None),
+                "name": getattr(loc, "name", None),
+                "client_name": getattr(loc, "client_name", None),
+                "center": loc_center,
+                "radius": loc_radius,
+            },
+        })
+
+    return JsonResponse({
+        "warning_minutes": GEOFENCE_WARNING_MINUTES,
+        "now": now.isoformat(),
+        "results": results,
+    })
 
 
 class GuardReportListCreateView(generics.ListCreateAPIView):
