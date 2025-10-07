@@ -785,7 +785,7 @@ class ResolveLocationSerializer(serializers.Serializer):
 
     def find_best_location(self, employee: Employee, lat: float, lng: float):
         qs = Location.objects.filter(assigned_employees=employee)
-        best = None  # (loc, distance_m, mode)
+        best = None  # (loc, distance_m, mode, within_radius)
 
         for loc in qs:
             # polygon أولاً
@@ -796,7 +796,17 @@ class ResolveLocationSerializer(serializers.Serializer):
                         poly = json.loads(poly)
                     polygon = [(float(p[0]), float(p[1])) for p in poly]
                     if _point_in_polygon((lat, lng), polygon):
-                        return loc, 0.0, "polygon"
+                        return loc, 0.0, "polygon", True
+                    else:
+                        # احسب أقرب مسافة للمضلّع لتقريب الابتعاد
+                        distances = [
+                            _haversine_m(lat, lng, float(p[0]), float(p[1]))
+                            for p in polygon
+                        ]
+                        if distances:
+                            dist = min(distances)
+                            if (best is None) or (dist < best[1]):
+                                best = (loc, dist, "polygon", False)
                 except Exception:
                     pass
 
@@ -807,9 +817,17 @@ class ResolveLocationSerializer(serializers.Serializer):
                 except Exception:
                     continue
                 dist = _haversine_m(lat, lng, la, ln)
-                if dist <= float(loc.gps_radius):
+                try:
+                    radius = float(loc.gps_radius)
+                except Exception:
+                    radius = 0.0
+                within_radius = radius <= 0 or dist <= radius
+                if within_radius:
+                    if (best is None) or (dist < best[1]) or (best and not best[3]):
+                        best = (loc, dist, "radius", True)
+                else:
                     if (best is None) or (dist < best[1]):
-                        best = (loc, dist, "radius")
+                        best = (loc, dist, "radius", False)
 
         return best
 

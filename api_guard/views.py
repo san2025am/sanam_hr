@@ -645,15 +645,8 @@ class AttendanceCheckAPIView(APIView):
             if update_fields:
                 rec.save(update_fields=update_fields)
             if violation_flag:
-                self._record_geofence_violation(
-                    record=rec,
-                    reason=violation_reason,
-                    distance=dist,
-                    radius=radius,
-                    codes=violation_codes,
-                    outside_minutes=None,
-                )
-                violation_escalated = True
+                rec.is_violation = True
+                rec.save(update_fields=["is_violation"])
             return Response({
                 "ok": True,
                 "performed": True,
@@ -855,7 +848,7 @@ class ResolveLocationAPIView(APIView):
         if not found:
             return Response({"detail": "لا يوجد موقع مكلَّف به ضمن النطاق."}, status=404)
 
-        loc, dist, mode = found
+        loc, dist, mode, within_radius = found
         la, ln = (None, None)
         if loc.gps_coordinates:
             try:
@@ -863,17 +856,23 @@ class ResolveLocationAPIView(APIView):
             except Exception:
                 pass
 
+        try:
+            radius_val = float(loc.gps_radius)
+        except (TypeError, ValueError):
+            radius_val = None
+
         data = {
-            "detail": "تم تحديد الموقع",
+            "detail": "تم تحديد الموقع" if within_radius else "تم العثور على أقرب موقع لكنك خارج النطاق.",
             "location_id": str(loc.id),
             "name": loc.name,
             "client_name": loc.client_name,
             "lat": la, "lng": ln,
-            "radius": float(loc.gps_radius),
+            "radius": radius_val,
             "distance": round(dist, 2),
             "mode": mode,  # polygon | radius
+            "within_radius": within_radius,
         }
-        return Response(data, status=200)
+        return Response(data, status=status.HTTP_200_OK)
 
 
 class GuardReportListCreateView(generics.ListCreateAPIView):
