@@ -497,6 +497,15 @@ class AttendanceCheckSerializer(serializers.Serializer):
             return attrs
 
         # ===== فحص الموقع (دقة/مضلّع/نصف قطر) =====
+        violation_messages = []
+        violation_codes: list[str] = []
+        attrs["violation"] = False
+        attrs["violation_reason"] = None
+        attrs["violation_codes"] = violation_codes
+        attrs["location_radius_m"] = None
+        attrs["location_center_lat"] = None
+        attrs["location_center_lng"] = None
+
         if getattr(location, "gps_radius", None):
             try:
                 if acc > float(location.gps_radius):
@@ -523,12 +532,10 @@ class AttendanceCheckSerializer(serializers.Serializer):
                 })
                 return attrs
             if not inside_polygon:
-                attrs.update({
-                    "employee": employee, "location_obj": location,
-                    "blocked": True,
-                    "blocked_reason": "⚠️ جهازك حالياً خارج حدود الموقع المعتمد. يرجى الانتقال إلى نطاق الموقع ثم المحاولة مجددًا.",
-                })
-                return attrs
+                violation_messages.append(
+                    "⚠️ تم رصد الجهاز خارج حدود الموقع المعتمد. يرجى العودة إلى الموقع بأسرع وقت."
+                )
+                violation_codes.append("outside_polygon")
 
         if not (getattr(location, "use_polygon", False) and inside_polygon):
             if not getattr(location, "gps_coordinates", None):
@@ -553,17 +560,14 @@ class AttendanceCheckSerializer(serializers.Serializer):
                 radius = float(location.gps_radius)
             except Exception:
                 radius = 0.0
+            attrs["location_radius_m"] = radius
+            attrs["location_center_lat"] = loc_lat
+            attrs["location_center_lng"] = loc_lng
             if radius and dist > radius:
-                attrs.update({
-                    "employee": employee, "location_obj": location,
-                    "blocked": True,
-                    "blocked_reason": (
-                        "⚠️ جهازك خارج نطاق الموقع المسموح به."
-                        f" المسافة عن الموقع: {int(round(dist))}م (النطاق المتاح {int(radius)}م)."
-                        " يرجى الاقتراب من الموقع ثم إعادة المحاولة."
-                    ),
-                })
-                return attrs
+                violation_messages.append(
+                    "⚠️ جهازك خارج نطاق الموقع المسموح به. ستُسجّل مخالفة في حال استمرار الابتعاد لأكثر من المدة المسموح بها."
+                )
+                violation_codes.append("outside_radius")
 
         # ===== حساب نافذة الوردية =====
         now_aware = dj_timezone.now()
@@ -712,6 +716,13 @@ class AttendanceCheckSerializer(serializers.Serializer):
                 })
                 return attrs
 
+        if violation_messages:
+            attrs["violation"] = True
+            attrs["violation_reason"] = " ".join(violation_messages)
+        else:
+            attrs["violation"] = False
+            attrs["violation_reason"] = None
+
         attrs.update({
             "employee": employee,
             "location_obj": location,
@@ -738,6 +749,7 @@ class AttendanceCheckSerializer(serializers.Serializer):
             "biometric_verified": validated_data.get("biometric_verified", False),
             "biometric_method": validated_data.get("biometric_method", ""),
             "biometric_attempts": validated_data.get("biometric_attempts", 0),
+            "is_violation": validated_data.get("violation", False),
             "notes": (
                 f"{action} lat={validated_data['lat']}, lng={validated_data['lng']}, "
                 f"acc={validated_data.get('accuracy')}, "
@@ -1145,4 +1157,3 @@ class AttendanceMiniSerializer(serializers.ModelSerializer):
             "location_name",
             "updated_at",
         ]
-

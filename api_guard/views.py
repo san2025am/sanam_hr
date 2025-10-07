@@ -6,6 +6,7 @@ import logging
 from datetime import timedelta
 
 from django.conf import settings
+from django.core.mail import send_mail
 from django.utils import timezone as dj_timezone
 from django.db import IntegrityError
 
@@ -29,6 +30,8 @@ from .models import (
     TrustedDevice,
     DeviceLoginChallenge,
     UniformItem,
+    ViolationRule,
+    EmployeeViolation,
 )
 from .serializers import (
     GUARD_ROLE_NAMES,
@@ -47,12 +50,19 @@ from .serializers import (
 )
 from .emailer import send_email_otp
 from .services.attendance import close_stale_attendance_for_employee
+from .sms import send_sms_twilio
 
 
 User = get_user_model()
 
 
 logger = logging.getLogger(__name__)
+
+GEOFENCE_WARNING_MINUTES = int(getattr(settings, "GEOFENCE_OUTSIDE_WARNING_MINUTES", 60))
+GEOFENCE_RULE_TITLE = "الخروج عن نطاق الموقع"
+GEOFENCE_RULE_DESCRIPTION = (
+    "يتم تسجيل هذه المخالفة عند خروج الحارس عن نطاق الموقع المحدد لأكثر من المدة المسموح بها."
+)
 
 
 _GUARD_ROLE_NAMES_CI = {name.casefold() for name in GUARD_ROLE_NAMES}
@@ -406,6 +416,117 @@ class AttendanceCheckAPIView(APIView):
         if extra: payload.update(extra)
         return Response(payload, status=status.HTTP_200_OK)
 
+    def _record_geofence_violation(self, *, record: AttendanceRecord, reason: str | None,
+                                   distance: float | None, radius: float | None,
+                                   codes: list[str], outside_minutes: float | None) -> None:
+        note_parts = []
+        if record.notes:
+            note_parts.append(record.notes)
+        summary = reason or "تم رصد خروج عن نطاق الموقع المحدد."
+        dist_text = f"{round(distance or 0.0, 2)}م"
+        radius_text = f"{int(radius or 0)}م"
+        duration_text = None
+        if outside_minutes is not None:
+            duration_text = f"{int(round(outside_minutes))} دقيقة تقريباً"
+        violation_note = f"[GEOFENCE] {summary} (المسافة {dist_text} / النطاق {radius_text})"
+        if duration_text:
+            violation_note = f"{violation_note} - مدة الابتعاد {duration_text}"
+        note_parts.append(violation_note)
+        record.notes = "\n".join(part for part in note_parts if part)
+        record.is_violation = True
+        record.save(update_fields=["notes", "is_violation"])
+
+        rule, _ = ViolationRule.objects.get_or_create(
+            title=GEOFENCE_RULE_TITLE,
+            defaults={
+                "description": GEOFENCE_RULE_DESCRIPTION,
+                "default_action": "warn",
+            },
+        )
+        warning_level = (
+            EmployeeViolation.objects.filter(employee=record.employee, rule=rule).count() + 1
+        )
+
+        description = f"{summary} المسافة الحالية {dist_text} (النطاق {radius_text})."
+        if duration_text:
+            description = f"{description} استمر الابتعاد لمدة {duration_text}."
+        if codes:
+            description = f"{description} الرموز: {', '.join(codes)}."
+
+        EmployeeViolation.objects.create(
+            employee=record.employee,
+            rule=rule,
+            reported_by=getattr(record.employee, "supervisor", None),
+            location=record.location,
+            description=description,
+            warning_level=warning_level,
+        )
+
+        self._send_geofence_alert(
+            employee=record.employee,
+            location=record.location,
+            reason=summary,
+            distance=distance,
+            radius=radius,
+            outside_minutes=outside_minutes,
+        )
+
+    def _send_geofence_alert(self, *, employee: Employee, location, reason: str,
+                             distance: float | None, radius: float | None,
+                             outside_minutes: float | None) -> None:
+        location_name = getattr(location, "name", "الموقع المحدد")
+        client_name = getattr(location, "client_name", "")
+        distance_txt = f"{round(distance or 0.0, 2)} متر"
+        radius_txt = f"{int(radius or 0)} متر"
+        duration_txt = ""
+        if outside_minutes is not None:
+            duration_txt = f" مدة الابتعاد التقريبية {int(round(outside_minutes))} دقيقة."
+
+        message = (
+            f"تنبيه مخالفة موقع للحارس {employee.full_name}."
+            f" السبب: {reason}."
+            f" الموقع: {location_name}"
+        )
+        if client_name:
+            message = f"{message} - العميل: {client_name}"
+        message = (
+            f"{message}. المسافة الحالية عن مركز الموقع {distance_txt} مقابل نطاق مسموح {radius_txt}."
+            f"{duration_txt} يجب عدم تجاوز {GEOFENCE_WARNING_MINUTES} دقيقة خارج النطاق."
+        )
+
+        emails = []
+        employee_email = getattr(getattr(employee, "user", None), "email", None)
+        if employee_email:
+            emails.append(employee_email)
+        supervisor = getattr(employee, "supervisor", None)
+        supervisor_email = getattr(getattr(supervisor, "user", None), "email", None)
+        if supervisor_email:
+            emails.append(supervisor_email)
+        unique_emails = list({addr for addr in emails if addr})
+        from_email = getattr(settings, "DEFAULT_FROM_EMAIL", None)
+        if unique_emails and from_email:
+            try:
+                send_mail(
+                    subject="تنبيه مخالفة الخروج عن الموقع",
+                    message=message,
+                    from_email=from_email,
+                    recipient_list=unique_emails,
+                    fail_silently=True,
+                )
+            except Exception as exc:  # pragma: no cover - depends on backend
+                logger.warning("Failed to send geofence violation email: %s", exc)
+
+        sms_numbers = []
+        if getattr(employee, "phone_number", None):
+            sms_numbers.append(employee.phone_number)
+        if supervisor and getattr(supervisor, "phone_number", None):
+            sms_numbers.append(supervisor.phone_number)
+        for number in {num for num in sms_numbers if num}:
+            try:
+                send_sms_twilio(number, message)
+            except Exception as exc:  # pragma: no cover - external service
+                logger.warning("Failed to send geofence violation SMS to %s: %s", number, exc)
+
     def post(self, request):
         cleanup_employee = (Employee.objects
                               .select_related("user", "supervisor")
@@ -451,11 +572,17 @@ class AttendanceCheckAPIView(APIView):
         action   = ser.validated_data.get("action")
         employee = ser.validated_data.get("employee")
         location = ser.validated_data.get("location_obj")
-        lat      = ser.validated_data.get("lat")
-        lng      = ser.validated_data.get("lng")
-        acc      = ser.validated_data.get("accuracy")
-        raw_dist = ser.validated_data.get("distance_m")
-        dist     = float(raw_dist) if raw_dist is not None else 0.0
+        lat       = ser.validated_data.get("lat")
+        lng       = ser.validated_data.get("lng")
+        acc       = ser.validated_data.get("accuracy")
+        raw_dist  = ser.validated_data.get("distance_m")
+        dist      = float(raw_dist) if raw_dist is not None else 0.0
+        radius    = ser.validated_data.get("location_radius_m")
+        center_lat = ser.validated_data.get("location_center_lat")
+        center_lng = ser.validated_data.get("location_center_lng")
+        violation_flag = bool(ser.validated_data.get("violation", False))
+        violation_reason = ser.validated_data.get("violation_reason")
+        violation_codes = list(ser.validated_data.get("violation_codes") or [])
 
         now       = dj_timezone.now()
         now_local = dj_timezone.localtime(now)
@@ -474,6 +601,7 @@ class AttendanceCheckAPIView(APIView):
             )
 
         # ===== تنفيذ الإجراءات =====
+        violation_escalated = False
         if action == "check_in":
             # منع تسجيل حضور جديد إن وُجد سجل مفتوح
             open_rec = (AttendanceRecord.objects
@@ -516,6 +644,16 @@ class AttendanceCheckAPIView(APIView):
                 update_fields.append("is_violation")
             if update_fields:
                 rec.save(update_fields=update_fields)
+            if violation_flag:
+                self._record_geofence_violation(
+                    record=rec,
+                    reason=violation_reason,
+                    distance=dist,
+                    radius=radius,
+                    codes=violation_codes,
+                    outside_minutes=None,
+                )
+                violation_escalated = True
             return Response({
                 "ok": True,
                 "performed": True,
@@ -529,6 +667,18 @@ class AttendanceCheckAPIView(APIView):
                 "employee": getattr(employee, "full_name", str(employee.pk)),
                 "location_id": str(location.id) if getattr(location, "id", None) else None,
                 "location_name": getattr(location, "name", None),
+                "distance_m": round(dist, 2) if raw_dist is not None else None,
+                "location_center": {
+                    "lat": center_lat,
+                    "lng": center_lng,
+                    "radius_m": radius,
+                },
+                "violation": violation_flag,
+                "violation_reason": violation_reason,
+                "violation_codes": violation_codes,
+                "violation_warning_minutes": GEOFENCE_WARNING_MINUTES,
+                "violation_outside_minutes": None,
+                "violation_escalated": violation_escalated,
             }, status=status.HTTP_201_CREATED)
 
         elif action == "check_out":
@@ -558,8 +708,24 @@ class AttendanceCheckAPIView(APIView):
             rec.location = rec.location or location
             rec.check_type = action
             rec.timestamp = rec.timestamp or now
-            rec.is_violation = False
-            rec.save(update_fields=["check_out_time", "notes", "location", "check_type", "timestamp", "is_violation"])
+            update_fields = ["check_out_time", "notes", "location", "check_type", "timestamp"]
+            if violation_flag or rec.is_violation:
+                rec.is_violation = rec.is_violation or violation_flag
+                update_fields.append("is_violation")
+            rec.save(update_fields=update_fields)
+            violation_outside_minutes = None
+            if violation_flag and rec.check_in_time:
+                violation_outside_minutes = (now_local - rec.check_in_time).total_seconds() / 60.0
+                if violation_outside_minutes >= GEOFENCE_WARNING_MINUTES:
+                    self._record_geofence_violation(
+                        record=rec,
+                        reason=violation_reason,
+                        distance=dist,
+                        radius=radius,
+                        codes=violation_codes,
+                        outside_minutes=violation_outside_minutes,
+                    )
+                    violation_escalated = True
 
             return Response({
                 "ok": True,
@@ -573,6 +739,18 @@ class AttendanceCheckAPIView(APIView):
                 "employee": getattr(employee, "full_name", str(employee.pk)),
                 "location_id": str(rec.location.id) if rec.location else None,
                 "location_name": getattr(rec.location, "name", None) if rec.location else None,
+                "distance_m": round(dist, 2) if raw_dist is not None else None,
+                "location_center": {
+                    "lat": center_lat,
+                    "lng": center_lng,
+                    "radius_m": radius,
+                },
+                "violation": violation_flag,
+                "violation_reason": violation_reason,
+                "violation_codes": violation_codes,
+                "violation_warning_minutes": GEOFENCE_WARNING_MINUTES,
+                "violation_outside_minutes": violation_outside_minutes,
+                "violation_escalated": violation_escalated,
             }, status=status.HTTP_200_OK)
 
         elif action == "early_check_out":
@@ -612,8 +790,26 @@ class AttendanceCheckAPIView(APIView):
             rec.location = rec.location or location
             rec.check_type = action
             rec.timestamp = rec.timestamp or now
-            rec.is_violation = False
-            rec.save()
+            update_fields = ["check_out_time", "early_checkout", "early_reason", "notes", "location", "check_type", "timestamp"]
+            if file_obj:
+                update_fields.append("early_attachment")
+            if violation_flag or rec.is_violation:
+                rec.is_violation = rec.is_violation or violation_flag
+                update_fields.append("is_violation")
+            rec.save(update_fields=update_fields)
+            violation_outside_minutes = None
+            if violation_flag and rec.check_in_time:
+                violation_outside_minutes = (now_local - rec.check_in_time).total_seconds() / 60.0
+                if violation_outside_minutes >= GEOFENCE_WARNING_MINUTES:
+                    self._record_geofence_violation(
+                        record=rec,
+                        reason=violation_reason,
+                        distance=dist,
+                        radius=radius,
+                        codes=violation_codes,
+                        outside_minutes=violation_outside_minutes,
+                    )
+                    violation_escalated = True
 
             return Response({
                 "ok": True,
@@ -626,6 +822,18 @@ class AttendanceCheckAPIView(APIView):
                 "employee": getattr(employee, "full_name", str(employee.pk)),
                 "location_id": str(rec.location.id) if rec.location else None,
                 "location_name": getattr(rec.location, "name", None) if rec.location else None,
+                "distance_m": round(dist, 2) if raw_dist is not None else None,
+                "location_center": {
+                    "lat": center_lat,
+                    "lng": center_lng,
+                    "radius_m": radius,
+                },
+                "violation": violation_flag,
+                "violation_reason": violation_reason,
+                "violation_codes": violation_codes,
+                "violation_warning_minutes": GEOFENCE_WARNING_MINUTES,
+                "violation_outside_minutes": violation_outside_minutes,
+                "violation_escalated": violation_escalated,
             }, status=status.HTTP_200_OK)
 
         return self._deny(action=action, detail="إجراء غير مدعوم.", reason_code="unsupported_action")
