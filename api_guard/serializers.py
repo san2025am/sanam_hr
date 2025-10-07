@@ -783,6 +783,10 @@ class ResolveLocationSerializer(serializers.Serializer):
         attrs["employee"] = employee
         return attrs
 
+
+class LocationPingSerializer(ResolveLocationSerializer):
+    recorded_at = serializers.DateTimeField(required=False)
+
     def find_best_location(self, employee: Employee, lat: float, lng: float):
         qs = Location.objects.filter(assigned_employees=employee)
         best = None  # (loc, distance_m, mode, within_radius)

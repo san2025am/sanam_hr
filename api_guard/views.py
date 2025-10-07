@@ -5,6 +5,8 @@ import secrets
 import logging
 from datetime import timedelta
 
+from typing import Optional, Sequence
+
 from django.conf import settings
 from django.core.mail import send_mail
 from django.utils import timezone as dj_timezone
@@ -32,6 +34,7 @@ from .models import (
     UniformItem,
     ViolationRule,
     EmployeeViolation,
+    LocationPing,
 )
 from .serializers import (
     GUARD_ROLE_NAMES,
@@ -40,6 +43,7 @@ from .serializers import (
     RequestSerializer,
     AdvanceSerializer,
     ResolveLocationSerializer,
+    LocationPingSerializer,
     AttendanceCheckSerializer,
     GuardTokenObtainPairSerializer,
     UsernameForgotSerializer,
@@ -63,6 +67,136 @@ GEOFENCE_RULE_TITLE = "الخروج عن نطاق الموقع"
 GEOFENCE_RULE_DESCRIPTION = (
     "يتم تسجيل هذه المخالفة عند خروج الحارس عن نطاق الموقع المحدد لأكثر من المدة المسموح بها."
 )
+
+
+def _send_geofence_alert(
+    *,
+    employee: Employee,
+    location,
+    reason: str,
+    distance: Optional[float],
+    radius: Optional[float],
+    outside_minutes: Optional[float],
+) -> None:
+    location_name = getattr(location, "name", "الموقع المحدد") if location else "الموقع المحدد"
+    client_name = getattr(location, "client_name", "") if location else ""
+    distance_txt = f"{round(distance or 0.0, 2)} متر"
+    radius_txt = f"{int(radius or 0)} متر"
+    duration_txt = ""
+    if outside_minutes is not None:
+        duration_txt = f" مدة الابتعاد التقريبية {int(round(outside_minutes))} دقيقة."
+
+    message = (
+        f"تنبيه مخالفة موقع للحارس {employee.full_name}."
+        f" السبب: {reason or 'خارج نطاق الموقع'}."
+        f" الموقع: {location_name}"
+    )
+    if client_name:
+        message = f"{message} - العميل: {client_name}"
+    message = (
+        f"{message}. المسافة الحالية عن مركز الموقع {distance_txt} مقابل نطاق مسموح {radius_txt}."
+        f"{duration_txt} يجب عدم تجاوز {GEOFENCE_WARNING_MINUTES} دقيقة خارج النطاق."
+    )
+
+    emails = []
+    employee_email = getattr(getattr(employee, "user", None), "email", None)
+    if employee_email:
+        emails.append(employee_email)
+    supervisor = getattr(employee, "supervisor", None)
+    supervisor_email = getattr(getattr(supervisor, "user", None), "email", None)
+    if supervisor_email:
+        emails.append(supervisor_email)
+    unique_emails = list({addr for addr in emails if addr})
+    from_email = getattr(settings, "DEFAULT_FROM_EMAIL", None)
+    if unique_emails and from_email:
+        try:
+            send_mail(
+                subject="تنبيه مخالفة الخروج عن الموقع",
+                message=message,
+                from_email=from_email,
+                recipient_list=unique_emails,
+                fail_silently=True,
+            )
+        except Exception as exc:  # pragma: no cover - depends on backend
+            logger.warning("Failed to send geofence violation email: %s", exc)
+
+    sms_numbers = []
+    if getattr(employee, "phone_number", None):
+        sms_numbers.append(employee.phone_number)
+    if supervisor and getattr(supervisor, "phone_number", None):
+        sms_numbers.append(supervisor.phone_number)
+    for number in {num for num in sms_numbers if num}:
+        try:
+            send_sms_twilio(number, message)
+        except Exception as exc:  # pragma: no cover - external service
+            logger.warning("Failed to send geofence violation SMS to %s: %s", number, exc)
+
+
+def record_geofence_violation(
+    *,
+    employee: Employee,
+    location,
+    reason: Optional[str],
+    distance: Optional[float],
+    radius: Optional[float],
+    codes: Sequence[str] | None,
+    outside_minutes: Optional[float],
+    attendance_record: Optional[AttendanceRecord] = None,
+) -> EmployeeViolation:
+    summary = reason or "تم رصد خروج عن نطاق الموقع المحدد."
+    dist_text = f"{round(distance or 0.0, 2)}م"
+    radius_text = f"{int(radius or 0)}م"
+    duration_text = None
+    if outside_minutes is not None:
+        duration_text = f"{int(round(outside_minutes))} دقيقة تقريباً"
+
+    if attendance_record:
+        note_parts = []
+        if attendance_record.notes:
+            note_parts.append(attendance_record.notes)
+        note = f"[GEOFENCE] {summary} (المسافة {dist_text} / النطاق {radius_text})"
+        if duration_text:
+            note = f"{note} - مدة الابتعاد {duration_text}"
+        note_parts.append(note)
+        attendance_record.notes = "\n".join(part for part in note_parts if part)
+        attendance_record.is_violation = True
+        attendance_record.save(update_fields=["notes", "is_violation"])
+
+    rule, _ = ViolationRule.objects.get_or_create(
+        title=GEOFENCE_RULE_TITLE,
+        defaults={
+            "description": GEOFENCE_RULE_DESCRIPTION,
+            "default_action": "warn",
+        },
+    )
+    warning_level = (
+        EmployeeViolation.objects.filter(employee=employee, rule=rule).count() + 1
+    )
+
+    description = f"{summary} المسافة الحالية {dist_text} (النطاق {radius_text})."
+    if duration_text:
+        description = f"{description} استمر الابتعاد لمدة {duration_text}."
+    if codes:
+        description = f"{description} الرموز: {', '.join(codes)}."
+
+    violation = EmployeeViolation.objects.create(
+        employee=employee,
+        rule=rule,
+        reported_by=getattr(employee, "supervisor", None),
+        location=location,
+        description=description,
+        warning_level=warning_level,
+    )
+
+    _send_geofence_alert(
+        employee=employee,
+        location=location,
+        reason=summary,
+        distance=distance,
+        radius=radius,
+        outside_minutes=outside_minutes,
+    )
+    return violation
 
 
 _GUARD_ROLE_NAMES_CI = {name.casefold() for name in GUARD_ROLE_NAMES}
@@ -416,117 +550,6 @@ class AttendanceCheckAPIView(APIView):
         if extra: payload.update(extra)
         return Response(payload, status=status.HTTP_200_OK)
 
-    def _record_geofence_violation(self, *, record: AttendanceRecord, reason: str | None,
-                                   distance: float | None, radius: float | None,
-                                   codes: list[str], outside_minutes: float | None) -> None:
-        note_parts = []
-        if record.notes:
-            note_parts.append(record.notes)
-        summary = reason or "تم رصد خروج عن نطاق الموقع المحدد."
-        dist_text = f"{round(distance or 0.0, 2)}م"
-        radius_text = f"{int(radius or 0)}م"
-        duration_text = None
-        if outside_minutes is not None:
-            duration_text = f"{int(round(outside_minutes))} دقيقة تقريباً"
-        violation_note = f"[GEOFENCE] {summary} (المسافة {dist_text} / النطاق {radius_text})"
-        if duration_text:
-            violation_note = f"{violation_note} - مدة الابتعاد {duration_text}"
-        note_parts.append(violation_note)
-        record.notes = "\n".join(part for part in note_parts if part)
-        record.is_violation = True
-        record.save(update_fields=["notes", "is_violation"])
-
-        rule, _ = ViolationRule.objects.get_or_create(
-            title=GEOFENCE_RULE_TITLE,
-            defaults={
-                "description": GEOFENCE_RULE_DESCRIPTION,
-                "default_action": "warn",
-            },
-        )
-        warning_level = (
-            EmployeeViolation.objects.filter(employee=record.employee, rule=rule).count() + 1
-        )
-
-        description = f"{summary} المسافة الحالية {dist_text} (النطاق {radius_text})."
-        if duration_text:
-            description = f"{description} استمر الابتعاد لمدة {duration_text}."
-        if codes:
-            description = f"{description} الرموز: {', '.join(codes)}."
-
-        EmployeeViolation.objects.create(
-            employee=record.employee,
-            rule=rule,
-            reported_by=getattr(record.employee, "supervisor", None),
-            location=record.location,
-            description=description,
-            warning_level=warning_level,
-        )
-
-        self._send_geofence_alert(
-            employee=record.employee,
-            location=record.location,
-            reason=summary,
-            distance=distance,
-            radius=radius,
-            outside_minutes=outside_minutes,
-        )
-
-    def _send_geofence_alert(self, *, employee: Employee, location, reason: str,
-                             distance: float | None, radius: float | None,
-                             outside_minutes: float | None) -> None:
-        location_name = getattr(location, "name", "الموقع المحدد")
-        client_name = getattr(location, "client_name", "")
-        distance_txt = f"{round(distance or 0.0, 2)} متر"
-        radius_txt = f"{int(radius or 0)} متر"
-        duration_txt = ""
-        if outside_minutes is not None:
-            duration_txt = f" مدة الابتعاد التقريبية {int(round(outside_minutes))} دقيقة."
-
-        message = (
-            f"تنبيه مخالفة موقع للحارس {employee.full_name}."
-            f" السبب: {reason}."
-            f" الموقع: {location_name}"
-        )
-        if client_name:
-            message = f"{message} - العميل: {client_name}"
-        message = (
-            f"{message}. المسافة الحالية عن مركز الموقع {distance_txt} مقابل نطاق مسموح {radius_txt}."
-            f"{duration_txt} يجب عدم تجاوز {GEOFENCE_WARNING_MINUTES} دقيقة خارج النطاق."
-        )
-
-        emails = []
-        employee_email = getattr(getattr(employee, "user", None), "email", None)
-        if employee_email:
-            emails.append(employee_email)
-        supervisor = getattr(employee, "supervisor", None)
-        supervisor_email = getattr(getattr(supervisor, "user", None), "email", None)
-        if supervisor_email:
-            emails.append(supervisor_email)
-        unique_emails = list({addr for addr in emails if addr})
-        from_email = getattr(settings, "DEFAULT_FROM_EMAIL", None)
-        if unique_emails and from_email:
-            try:
-                send_mail(
-                    subject="تنبيه مخالفة الخروج عن الموقع",
-                    message=message,
-                    from_email=from_email,
-                    recipient_list=unique_emails,
-                    fail_silently=True,
-                )
-            except Exception as exc:  # pragma: no cover - depends on backend
-                logger.warning("Failed to send geofence violation email: %s", exc)
-
-        sms_numbers = []
-        if getattr(employee, "phone_number", None):
-            sms_numbers.append(employee.phone_number)
-        if supervisor and getattr(supervisor, "phone_number", None):
-            sms_numbers.append(supervisor.phone_number)
-        for number in {num for num in sms_numbers if num}:
-            try:
-                send_sms_twilio(number, message)
-            except Exception as exc:  # pragma: no cover - external service
-                logger.warning("Failed to send geofence violation SMS to %s: %s", number, exc)
-
     def post(self, request):
         cleanup_employee = (Employee.objects
                               .select_related("user", "supervisor")
@@ -645,17 +668,17 @@ class AttendanceCheckAPIView(APIView):
             if update_fields:
                 rec.save(update_fields=update_fields)
             if violation_flag:
-                self._record_geofence_violation(
-                    record=rec,
+                record_geofence_violation(
+                    employee=employee,
+                    location=location,
                     reason=violation_reason,
                     distance=dist,
                     radius=radius,
                     codes=violation_codes,
                     outside_minutes=None,
+                    attendance_record=rec,
                 )
                 violation_escalated = True
-                rec.is_violation = True
-                rec.save(update_fields=["is_violation"])
             return Response({
                 "ok": True,
                 "performed": True,
@@ -719,13 +742,15 @@ class AttendanceCheckAPIView(APIView):
             if violation_flag and rec.check_in_time:
                 violation_outside_minutes = (now_local - rec.check_in_time).total_seconds() / 60.0
                 if violation_outside_minutes >= GEOFENCE_WARNING_MINUTES:
-                    self._record_geofence_violation(
-                        record=rec,
+                    record_geofence_violation(
+                        employee=employee,
+                        location=rec.location or location,
                         reason=violation_reason,
                         distance=dist,
                         radius=radius,
                         codes=violation_codes,
                         outside_minutes=violation_outside_minutes,
+                        attendance_record=rec,
                     )
                     violation_escalated = True
 
@@ -803,13 +828,15 @@ class AttendanceCheckAPIView(APIView):
             if violation_flag and rec.check_in_time:
                 violation_outside_minutes = (now_local - rec.check_in_time).total_seconds() / 60.0
                 if violation_outside_minutes >= GEOFENCE_WARNING_MINUTES:
-                    self._record_geofence_violation(
-                        record=rec,
+                    record_geofence_violation(
+                        employee=employee,
+                        location=rec.location or location,
                         reason=violation_reason,
                         distance=dist,
                         radius=radius,
                         codes=violation_codes,
                         outside_minutes=violation_outside_minutes,
+                        attendance_record=rec,
                     )
                     violation_escalated = True
 
@@ -878,6 +905,130 @@ class ResolveLocationAPIView(APIView):
             "distance": round(dist, 2),
             "mode": mode,  # polygon | radius
             "within_radius": within_radius,
+        }
+        return Response(data, status=status.HTTP_200_OK)
+
+
+class LocationPingAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        ser = LocationPingSerializer(data=request.data, context={"request": request})
+        if not ser.is_valid():
+            return Response({"detail": ser.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+        employee = ser.validated_data["employee"]
+        lat = ser.validated_data["lat"]
+        lng = ser.validated_data["lng"]
+        accuracy = ser.validated_data.get("accuracy")
+        recorded_at = ser.validated_data.get("recorded_at") or dj_timezone.now()
+
+        found = ser.find_best_location(employee, lat, lng)
+        if not found:
+            return Response({"detail": "لا يوجد موقع مكلَّف به ضمن النطاق."}, status=status.HTTP_404_NOT_FOUND)
+
+        loc, dist, mode, within_radius = found
+        radius = None
+        if getattr(loc, "gps_radius", None):
+            try:
+                radius = float(loc.gps_radius)
+            except (TypeError, ValueError):
+                radius = None
+
+        center_lat = center_lng = None
+        if loc.gps_coordinates:
+            try:
+                center_lat, center_lng = [float(x.strip()) for x in loc.gps_coordinates.split(",", 1)]
+            except Exception:
+                pass
+
+        ping = LocationPing.objects.create(
+            employee=employee,
+            location=loc,
+            latitude=lat,
+            longitude=lng,
+            accuracy=accuracy,
+            distance_m=dist,
+            within_radius=within_radius,
+            recorded_at=recorded_at,
+        )
+
+        violation_triggered = False
+        outside_minutes = None
+        violation_reason = None
+        violation_codes: list[str] = []
+        if not within_radius:
+            violation_codes = ["outside_polygon"] if mode == "polygon" else ["outside_radius"]
+            violation_reason = (
+                "تم رصد الجهاز خارج حدود الموقع المعتمد."
+                if mode == "polygon"
+                else "تم رصد الجهاز خارج نطاق الموقع المسموح به."
+            )
+
+            last_inside = (
+                LocationPing.objects
+                .filter(employee=employee, within_radius=True, recorded_at__lte=recorded_at)
+                .order_by('-recorded_at')
+                .first()
+            )
+            outside_start = last_inside.recorded_at if last_inside else None
+            if outside_start is None:
+                last_attendance = (
+                    AttendanceRecord.objects
+                    .filter(employee=employee)
+                    .order_by('-check_in_time')
+                    .first()
+                )
+                if last_attendance:
+                    outside_start = (
+                        last_attendance.check_out_time
+                        or last_attendance.check_in_time
+                        or recorded_at
+                    )
+            if outside_start is None:
+                outside_start = recorded_at
+            outside_minutes = max(0.0, (recorded_at - outside_start).total_seconds() / 60.0)
+
+            if outside_minutes >= GEOFENCE_WARNING_MINUTES:
+                existing_violation = LocationPing.objects.filter(
+                    employee=employee,
+                    violation_triggered=True,
+                    recorded_at__gte=outside_start,
+                ).exists()
+                if not existing_violation:
+                    record_geofence_violation(
+                        employee=employee,
+                        location=loc,
+                        reason=violation_reason,
+                        distance=dist,
+                        radius=radius,
+                        codes=violation_codes,
+                        outside_minutes=outside_minutes,
+                        attendance_record=None,
+                    )
+                    ping.violation_triggered = True
+                    ping.save(update_fields=["violation_triggered"])
+                    violation_triggered = True
+
+        data = {
+            "ok": True,
+            "within_radius": within_radius,
+            "distance": round(dist, 2) if dist is not None else None,
+            "radius": radius,
+            "mode": mode,
+            "location": {
+                "id": str(loc.id),
+                "name": loc.name,
+                "client_name": getattr(loc, "client_name", ""),
+                "center_lat": center_lat,
+                "center_lng": center_lng,
+            },
+            "violation": not within_radius,
+            "violation_reason": violation_reason,
+            "violation_codes": violation_codes,
+            "violation_triggered": violation_triggered,
+            "outside_minutes": outside_minutes,
+            "recorded_at": recorded_at.isoformat(),
         }
         return Response(data, status=status.HTTP_200_OK)
 

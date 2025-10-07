@@ -7,7 +7,7 @@ from django.contrib.contenttypes.models import ContentType
 
 from .models import (
     EmployeeShiftAssignment, Role, User, Employee, Location, EmployeeLocationAssignment, Task, Shift,
-    AttendanceRecord, Salary, Report, ReportAttachment, Request, EmployeeLeaveBalance,
+    AttendanceRecord, LocationPing, Salary, Report, ReportAttachment, Request, EmployeeLeaveBalance,
     ViolationRule, EmployeeViolation,  # <-- الجديد بدل Violation
     Contract, Advance, Custody, LogisticRequest,
     UniformItem, UniformDelivery, UniformDeliveryItem,
@@ -274,6 +274,15 @@ class AttendanceRecordAdmin(admin.ModelAdmin):
     search_fields = ('employee__full_name',)
     autocomplete_fields = ('employee', 'location', 'shift')
     ordering = ['-check_in_time']  # ← كانت في مكان خاطئ بنصّك السابق
+
+
+@admin.register(LocationPing)
+class LocationPingAdmin(admin.ModelAdmin):
+    list_display = ('employee', 'location', 'recorded_at', 'within_radius', 'distance_m', 'violation_triggered')
+    list_filter = ('within_radius', 'violation_triggered', 'location')
+    search_fields = ('employee__full_name', 'location__name')
+    autocomplete_fields = ('employee', 'location')
+    ordering = ['-recorded_at']
     
 @admin.register(Salary)
 class SalaryAdmin(admin.ModelAdmin):

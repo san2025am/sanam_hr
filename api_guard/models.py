@@ -305,6 +305,39 @@ class AttendanceRecord(BaseModel):
         ordering = ['-check_in_time']
 
 
+class LocationPing(BaseModel):
+    employee = models.ForeignKey(
+        Employee,
+        on_delete=models.CASCADE,
+        related_name="location_pings",
+        verbose_name="الموظف",
+    )
+    location = models.ForeignKey(
+        Location,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="location_pings",
+        verbose_name="الموقع",
+    )
+    latitude = models.FloatField()
+    longitude = models.FloatField()
+    accuracy = models.FloatField(null=True, blank=True)
+    distance_m = models.FloatField(null=True, blank=True)
+    within_radius = models.BooleanField(default=True)
+    violation_triggered = models.BooleanField(default=False)
+    recorded_at = models.DateTimeField(default=timezone.now, verbose_name="وقت التسجيل")
+
+    class Meta:
+        verbose_name = "7.1 تتبع موقع"
+        verbose_name_plural = "7.1 تتبع المواقع"
+        ordering = ['-recorded_at']
+
+    def __str__(self):
+        status = "داخل النطاق" if self.within_radius else "خارج النطاق"
+        return f"{self.employee.full_name} @ {self.recorded_at:%Y-%m-%d %H:%M} ({status})"
+
+
 class Salary(BaseModel):
     employee = models.OneToOneField(Employee, on_delete=models.CASCADE,verbose_name="الموظف")
     base_salary = models.DecimalField(max_digits=10, decimal_places=2, default=0, verbose_name="الراتب الأساسي")
