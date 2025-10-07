@@ -419,6 +419,22 @@ class AttendanceCheckAPIView(APIView):
             )
 
         ser = AttendanceCheckSerializer(data=request.data, context={"request": request})
+        if not ser.validated_data.get('biometric_verified', False):
+            return Response({'detail': 'التحقق البيومتري فشل، لا يمكن تسجيل الحضور.'}, status=403)
+
+    # إنشاء سجل الحضور مع القيم
+        AttendanceRecord.objects.create(
+            user=request.user,
+            check_type=check_type,
+            latitude=lat,
+            longitude=lng,
+            distance_from_expected_location=distance,
+            is_violation=is_violation,
+            biometric_verified=ser.validated_data.get('biometric_verified', False),
+            biometric_method=ser.validated_data.get('biometric_method', ''),
+            biometric_attempts=ser.validated_data.get('biometric_attempts', 0),
+        )
+
         if not ser.is_valid():
             # صياغة رسالة مفصلة بدل "تحقق من الحقول"
             err_text = []
@@ -451,7 +467,6 @@ class AttendanceCheckAPIView(APIView):
         lat      = ser.validated_data.get("lat")
         lng      = ser.validated_data.get("lng")
         acc      = ser.validated_data.get("accuracy")
-        dist     = ser.validated_data.get("distance_m")
 
         now       = dj_timezone.now()
         now_local = dj_timezone.localtime(now)

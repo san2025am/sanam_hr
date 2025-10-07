@@ -47,6 +47,7 @@ class UniformDeliveryItemInline(admin.TabularInline):
     readonly_fields = ('value',)
 
 
+
 @admin.register(LogEntry)
 class LogEntryAdmin(admin.ModelAdmin):
     list_display = ("action_time", "get_action", "user", "object_id", "object_repr", "get_app_model")
@@ -266,8 +267,10 @@ class EmployeeShiftAssignmentAdmin(admin.ModelAdmin):
 
 @admin.register(AttendanceRecord)
 class AttendanceRecordAdmin(admin.ModelAdmin):
-    list_display = ('employee', 'check_in_time', 'check_out_time', 'shift', 'work_type', 'location')
-    list_filter = ('location', 'work_type', 'shift', 'employee')
+    list_display = ('employee', 'check_in_time', 'check_out_time', 'shift', 'work_type', 'location','check_type', 'timestamp',
+        'biometric_method', 'biometric_verified', 'biometric_attempts',
+        'is_violation',)
+    list_filter = ('location', 'work_type', 'shift', 'employee','biometric_method', 'biometric_verified', 'is_violation')
     search_fields = ('employee__full_name',)
     autocomplete_fields = ('employee', 'location', 'shift')
     ordering = ['-check_in_time']  # ← كانت في مكان خاطئ بنصّك السابق

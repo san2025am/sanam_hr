@@ -13,7 +13,6 @@ import os
 
 from pathlib import Path
 from dotenv import load_dotenv
-load_dotenv()
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -83,9 +82,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'rest_framework_simplejwt',
     # تطبيقاتك الخاصة (Local apps)
-    'api_guard',
-    'rest_framework.authtoken',
-    'rest_framework_simplejwt.token_blacklist',
+    'api_guard', 
 ]
 AUTH_USER_MODEL = 'api_guard.User'
 
@@ -234,10 +231,3 @@ SIMPLE_JWT = {
     'SLIDING_TOKEN_LIFETIME': timedelta(minutes=5),
     'SLIDING_TOKEN_REFRESH_LIFETIME': timedelta(days=1),
 }
-
-
-SECURE_HSTS_SECONDS = int(os.getenv("SECURE_HSTS_SECONDS", "0"))
-SECURE_SSL_REDIRECT = os.getenv("SECURE_SSL_REDIRECT", "False").lower() == "true"
-SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "False").lower() == "true"
-CSRF_COOKIE_SECURE = os.getenv("CSRF_COOKIE_SECURE", "False").lower() == "true"
-X_FRAME_OPTIONS = "DENY"

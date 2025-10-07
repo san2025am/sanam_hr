@@ -387,6 +387,9 @@ class AttendanceCheckSerializer(serializers.Serializer):
     lat = serializers.FloatField()
     lng = serializers.FloatField()
     accuracy = serializers.FloatField(required=False, min_value=0, default=9999)
+    biometric_verified = serializers.BooleanField(default=False)
+    biometric_method = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    biometric_attempts = serializers.IntegerField(required=False, min_value=0, default=0)
 
     # ===== أدوات مساعدة هندسية =====
     @staticmethod
@@ -722,23 +725,36 @@ class AttendanceCheckSerializer(serializers.Serializer):
         return attrs
 
     def create(self, validated_data):
-        """يُنشئ سجل الحضور عند check_in فقط."""
-        if validated_data["action"] != "check_in":
-            return None
-
+        """
+        يُنشئ سجل الحضور لأي من check_in / check_out / early_check_out.
+        """
         now_local = validated_data.get("now_local") or dj_timezone.localtime(dj_timezone.now())
-        rec = AttendanceRecord.objects.create(
-            employee=validated_data["employee"],
-            location=validated_data["location_obj"],
-            shift=validated_data.get("current_shift"),
-            check_in_time=now_local,
-            notes=(
-                f"in lat={validated_data['lat']}, lng={validated_data['lng']}, "
+        action = validated_data["action"]
+
+        kwargs = {
+            "employee": validated_data["employee"],
+            "location": validated_data["location_obj"],
+            "shift": validated_data.get("current_shift"),
+            "biometric_verified": validated_data.get("biometric_verified", False),
+            "biometric_method": validated_data.get("biometric_method", ""),
+            "biometric_attempts": validated_data.get("biometric_attempts", 0),
+            "notes": (
+                f"{action} lat={validated_data['lat']}, lng={validated_data['lng']}, "
                 f"acc={validated_data.get('accuracy')}, "
                 f"dist={round(validated_data.get('distance_m') or 0.0, 2)}"
-            ),
-        )
+            )
+        }
+
+        if action == "check_in":
+            kwargs["check_in_time"] = now_local
+        elif action in ["check_out", "early_check_out"]:
+            kwargs["check_out_time"] = now_local
+        else:
+            raise ValueError(f"Unknown action: {action}")
+
+        rec = AttendanceRecord.objects.create(**kwargs)
         return rec
+
 
 class ResolveLocationSerializer(serializers.Serializer):
     lat = serializers.FloatField()

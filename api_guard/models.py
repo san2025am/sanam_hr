@@ -287,8 +287,16 @@ class AttendanceRecord(BaseModel):
     early_checkout  = models.BooleanField(default=False)
     early_reason    = models.TextField(null=True, blank=True)
     early_attachment = models.FileField(upload_to="early_checkout/", null=True, blank=True)
-
-
+    biometric_verified = models.BooleanField(default=False)
+    biometric_method = models.CharField(max_length=50, blank=True, null=True)
+    biometric_attempts = models.IntegerField(default=0)
+    check_type = models.CharField(max_length=20, choices=[
+        ('check_in', 'Check In'),
+        ('check_out', 'Check Out'),
+        ('early_check_out', 'Early Check Out')
+    ], default='check_in')
+    timestamp = models.DateTimeField(auto_now_add=True)
+    is_violation = models.BooleanField(default=False)
     def __str__(self): return f"{self.employee.full_name} - {self.check_in_time.strftime('%Y-%m-%d')}"
 
     class Meta:
