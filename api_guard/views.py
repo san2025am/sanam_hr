@@ -419,22 +419,6 @@ class AttendanceCheckAPIView(APIView):
             )
 
         ser = AttendanceCheckSerializer(data=request.data, context={"request": request})
-        if not ser.validated_data.get('biometric_verified', False):
-            return Response({'detail': 'التحقق البيومتري فشل، لا يمكن تسجيل الحضور.'}, status=403)
-
-    # إنشاء سجل الحضور مع القيم
-        AttendanceRecord.objects.create(
-            user=request.user,
-            check_type=check_type,
-            latitude=lat,
-            longitude=lng,
-            distance_from_expected_location=distance,
-            is_violation=is_violation,
-            biometric_verified=ser.validated_data.get('biometric_verified', False),
-            biometric_method=ser.validated_data.get('biometric_method', ''),
-            biometric_attempts=ser.validated_data.get('biometric_attempts', 0),
-        )
-
         if not ser.is_valid():
             # صياغة رسالة مفصلة بدل "تحقق من الحقول"
             err_text = []
@@ -460,6 +444,9 @@ class AttendanceCheckAPIView(APIView):
                 "errors": ser.errors
             }, status=status.HTTP_200_OK)
 
+        if not ser.validated_data.get('biometric_verified', False):
+            return Response({'detail': 'التحقق البيومتري فشل، لا يمكن تسجيل الحضور.'}, status=status.HTTP_403_FORBIDDEN)
+
         # استخراج القيم
         action   = ser.validated_data.get("action")
         employee = ser.validated_data.get("employee")
@@ -467,6 +454,8 @@ class AttendanceCheckAPIView(APIView):
         lat      = ser.validated_data.get("lat")
         lng      = ser.validated_data.get("lng")
         acc      = ser.validated_data.get("accuracy")
+        raw_dist = ser.validated_data.get("distance_m")
+        dist     = float(raw_dist) if raw_dist is not None else 0.0
 
         now       = dj_timezone.now()
         now_local = dj_timezone.localtime(now)
@@ -515,6 +504,18 @@ class AttendanceCheckAPIView(APIView):
 
             # إنشاء السجل
             rec = ser.save()
+            update_fields = []
+            if getattr(rec, "check_type", None) != action:
+                rec.check_type = action
+                update_fields.append("check_type")
+            if getattr(rec, "timestamp", None) is None:
+                rec.timestamp = now
+                update_fields.append("timestamp")
+            if getattr(rec, "is_violation", False):
+                rec.is_violation = False
+                update_fields.append("is_violation")
+            if update_fields:
+                rec.save(update_fields=update_fields)
             return Response({
                 "ok": True,
                 "performed": True,
@@ -553,9 +554,12 @@ class AttendanceCheckAPIView(APIView):
                 return self._deny(action=action, detail="لا يوجد سجل حضور مفتوح لإقفاله.", reason_code="no_open_record")
 
             rec.check_out_time = now_local
-            rec.notes = (rec.notes or "") + f" | out lat={lat}, lng={lng}, acc={acc}, dist={dist}"
+            rec.notes = (rec.notes or "") + f" | out lat={lat}, lng={lng}, acc={acc}, dist={round(dist, 2)}"
             rec.location = rec.location or location
-            rec.save(update_fields=["check_out_time", "notes", "location"])
+            rec.check_type = action
+            rec.timestamp = rec.timestamp or now
+            rec.is_violation = False
+            rec.save(update_fields=["check_out_time", "notes", "location", "check_type", "timestamp", "is_violation"])
 
             return Response({
                 "ok": True,
@@ -604,8 +608,11 @@ class AttendanceCheckAPIView(APIView):
             rec.early_reason   = reason_txt
             if file_obj:
                 rec.early_attachment = file_obj
-            rec.notes = (rec.notes or "") + f" | early-out lat={lat}, lng={lng}, acc={acc}, dist={dist}"
+            rec.notes = (rec.notes or "") + f" | early-out lat={lat}, lng={lng}, acc={acc}, dist={round(dist, 2)}"
             rec.location = rec.location or location
+            rec.check_type = action
+            rec.timestamp = rec.timestamp or now
+            rec.is_violation = False
             rec.save()
 
             return Response({
