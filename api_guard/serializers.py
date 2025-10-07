@@ -798,7 +798,6 @@ class ResolveLocationSerializer(serializers.Serializer):
                     if _point_in_polygon((lat, lng), polygon):
                         return loc, 0.0, "polygon", True
                     else:
-                        # احسب أقرب مسافة للمضلّع لتقريب الابتعاد
                         distances = [
                             _haversine_m(lat, lng, float(p[0]), float(p[1]))
                             for p in polygon
@@ -826,7 +825,7 @@ class ResolveLocationSerializer(serializers.Serializer):
                     if (best is None) or (dist < best[1]) or (best and not best[3]):
                         best = (loc, dist, "radius", True)
                 else:
-                    if (best is None) or (dist < best[1]):
+                    if (best is None) or (dist < best[1]) or (best and not best[3] and dist < best[1]):
                         best = (loc, dist, "radius", False)
 
         return best

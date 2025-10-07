@@ -54,6 +54,8 @@ SERVER_EMAIL = os.getenv("SERVER_EMAIL", DEFAULT_FROM_EMAIL)
 EMAIL_SUBJECT_PREFIX = os.getenv("EMAIL_SUBJECT_PREFIX", "[Sanam] ")
 EMAIL_REPLY_TO = os.getenv("DEFAULT_REPLY_TO")
 
+GEOFENCE_OUTSIDE_WARNING_MINUTES = _env_int("GEOFENCE_OUTSIDE_WARNING_MINUTES", 60)
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
