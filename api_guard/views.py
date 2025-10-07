@@ -973,18 +973,14 @@ class LocationPingAPIView(APIView):
             )
             outside_start = last_inside.recorded_at if last_inside else None
             if outside_start is None:
-                last_attendance = (
-                    AttendanceRecord.objects
-                    .filter(employee=employee)
-                    .order_by('-check_in_time')
+                last_ping = (
+                    LocationPing.objects
+                    .filter(employee=employee, recorded_at__lte=recorded_at)
+                    .order_by('-recorded_at')
                     .first()
                 )
-                if last_attendance:
-                    outside_start = (
-                        last_attendance.check_out_time
-                        or last_attendance.check_in_time
-                        or recorded_at
-                    )
+                if last_ping and not last_ping.within_radius:
+                    outside_start = last_ping.recorded_at
             if outside_start is None:
                 outside_start = recorded_at
             outside_minutes = max(0.0, (recorded_at - outside_start).total_seconds() / 60.0)
