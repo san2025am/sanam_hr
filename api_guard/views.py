@@ -58,7 +58,7 @@ User = get_user_model()
 
 logger = logging.getLogger(__name__)
 
-GEOFENCE_WARNING_MINUTES = int(getattr(settings, "GEOFENCE_OUTSIDE_WARNING_MINUTES", 60))
+GEOFENCE_WARNING_MINUTES = int(getattr(settings, "GEOFENCE_OUTSIDE_WARNING_MINUTES", 2))
 GEOFENCE_RULE_TITLE = "الخروج عن نطاق الموقع"
 GEOFENCE_RULE_DESCRIPTION = (
     "يتم تسجيل هذه المخالفة عند خروج الحارس عن نطاق الموقع المحدد لأكثر من المدة المسموح بها."
@@ -645,8 +645,15 @@ class AttendanceCheckAPIView(APIView):
             if update_fields:
                 rec.save(update_fields=update_fields)
             if violation_flag:
-                rec.is_violation = True
-                rec.save(update_fields=["is_violation"])
+                self._record_geofence_violation(
+                    record=rec,
+                    reason=violation_reason,
+                    distance=dist,
+                    radius=radius,
+                    codes=violation_codes,
+                    outside_minutes=None,
+                )
+                violation_escalated = True
             return Response({
                 "ok": True,
                 "performed": True,
@@ -848,7 +855,7 @@ class ResolveLocationAPIView(APIView):
         if not found:
             return Response({"detail": "لا يوجد موقع مكلَّف به ضمن النطاق."}, status=404)
 
-        loc, dist, mode, within_radius = found
+        loc, dist, mode = found
         la, ln = (None, None)
         if loc.gps_coordinates:
             try:
@@ -856,23 +863,17 @@ class ResolveLocationAPIView(APIView):
             except Exception:
                 pass
 
-        try:
-            radius_val = float(loc.gps_radius)
-        except (TypeError, ValueError):
-            radius_val = None
-
         data = {
-            "detail": "تم تحديد الموقع" if within_radius else "تم العثور على أقرب موقع لكنك خارج النطاق.",
+            "detail": "تم تحديد الموقع",
             "location_id": str(loc.id),
             "name": loc.name,
             "client_name": loc.client_name,
             "lat": la, "lng": ln,
-            "radius": radius_val,
+            "radius": float(loc.gps_radius),
             "distance": round(dist, 2),
             "mode": mode,  # polygon | radius
-            "within_radius": within_radius,
         }
-        return Response(data, status=status.HTTP_200_OK)
+        return Response(data, status=200)
 
 
 class GuardReportListCreateView(generics.ListCreateAPIView):
