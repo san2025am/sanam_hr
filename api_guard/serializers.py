@@ -227,6 +227,7 @@ class GuardTaskUpdateSerializer(serializers.Serializer):
 class ShiftAssignmentMiniSerializer(serializers.ModelSerializer):
     shift_name    = serializers.CharField(source="shift.name", read_only=True)
     location_name = serializers.CharField(source="location.name", read_only=True)
+    location_id   = serializers.CharField(source="location_id", read_only=True, allow_null=True)
     start_time = serializers.SerializerMethodField()
     end_time   = serializers.SerializerMethodField()
     checkin_grace        = serializers.IntegerField(read_only=True)
@@ -237,17 +238,19 @@ class ShiftAssignmentMiniSerializer(serializers.ModelSerializer):
     class Meta:
         model = EmployeeShiftAssignment
         fields = [
-            "id", "date", "shift_name", "location_name",
+            "id", "date", "shift_name", "location_name", "location_id",
             "start_time", "end_time",
             "checkin_grace", "checkout_grace", "checkout_grace_hours",
             "unrestricted", "active", "notes",
         ]
 
     def get_start_time(self, obj):
-        return (obj.start_time or getattr(obj.shift, "start_time", None))
+        value = obj.start_time or getattr(obj.shift, "start_time", None)
+        return value.strftime("%H:%M") if value else None
 
     def get_end_time(self, obj):
-        return (obj.end_time or getattr(obj.shift, "end_time", None))
+        value = obj.end_time or getattr(obj.shift, "end_time", None)
+        return value.strftime("%H:%M") if value else None
 
     def get_unrestricted(self, obj):
         return (obj.checkin_grace is None
@@ -575,6 +578,7 @@ class AttendanceCheckSerializer(serializers.Serializer):
 
         current_shift = None
         allowed_start = allowed_end = None
+        current_assignment = None
 
         assign_qs = (EmployeeShiftAssignment.objects
                      .select_related("shift", "location")
@@ -652,10 +656,13 @@ class AttendanceCheckSerializer(serializers.Serializer):
                     "blocked": True, "blocked_reason": reason,
                     "shift_window_start": win_l, "shift_window_end": win_r,
                     "current_shift": sh,
+                    "current_assignment": a,
+                    "shift_within_window": False,
                 })
                 return attrs
 
             current_shift, allowed_start, allowed_end = sh, win_l, win_r
+            current_assignment = a
             break
 
         if current_shift is None:
@@ -665,6 +672,8 @@ class AttendanceCheckSerializer(serializers.Serializer):
                 "blocked_reason": "⚠️ خارج أوقات الوردية الحالية. يرجى مراجعة المشرف.",
                 "shift_window_start": None, "shift_window_end": None,
                 "current_shift": None,
+                "current_assignment": None,
+                "shift_within_window": False,
             })
             return attrs
 
@@ -727,11 +736,13 @@ class AttendanceCheckSerializer(serializers.Serializer):
             "employee": employee,
             "location_obj": location,
             "current_shift": current_shift,
+            "current_assignment": current_assignment,
             "shift_window_start": allowed_start,
             "shift_window_end": allowed_end,
             "blocked": False,
             "blocked_reason": None,
             "now_local": now_local,
+            "shift_within_window": True,
         })
         return attrs
 

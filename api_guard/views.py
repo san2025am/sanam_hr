@@ -13,7 +13,7 @@ from django.conf import settings
 from django.core.mail import send_mail
 from django.utils import timezone as dj_timezone
 from django.db import IntegrityError
-from django.db.models import F, OuterRef, Subquery
+from django.db.models import F, OuterRef, Subquery, Q
 from django.http import JsonResponse
 from django.shortcuts import render
 from django.contrib.admin.views.decorators import staff_member_required
@@ -43,6 +43,7 @@ from .models import (
     EmployeeViolation,
     LocationPing,
     LocationMonitoringConfig,
+    EmployeeShiftAssignment,
 )
 from .serializers import (
     GUARD_ROLE_NAMES,
@@ -187,6 +188,73 @@ def _monitoring_details(
         payload["violation_rule_title"] = rule.title
         payload["violation_rule_action"] = rule.default_action
     return payload, active, grace_minutes, ping_seconds, outside_seconds, rule, config
+
+
+def _fmt_time(value) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, dt.datetime):
+        value = value.timetz()
+    if isinstance(value, dt.time):
+        return value.strftime("%H:%M")
+    return str(value)
+
+
+def _build_shift_payload(
+    *,
+    employee: Optional[Employee],
+    shift,
+    assignment,
+    allowed_start,
+    allowed_end,
+    location,
+    within_shift: Optional[bool],
+) -> Optional[dict[str, object]]:
+    if shift is None and assignment is None:
+        return None
+
+    if assignment is None and employee is not None and shift is not None:
+        qs = (EmployeeShiftAssignment.objects
+              .select_related("shift", "location")
+              .filter(employee=employee, active=True, shift=shift))
+        if location is not None:
+            qs = qs.filter(Q(location__isnull=True) | Q(location=location))
+        assignment = qs.order_by("-date", "-id").first()
+
+    shift_name = getattr(shift, "name", None) if shift else None
+    shift_start_time = None
+    shift_end_time = None
+    if assignment is not None:
+        shift_start_time = assignment.start_time or getattr(assignment.shift, "start_time", None)
+        shift_end_time = assignment.end_time or getattr(assignment.shift, "end_time", None)
+    elif shift is not None:
+        shift_start_time = getattr(shift, "start_time", None)
+        shift_end_time = getattr(shift, "end_time", None)
+
+    payload: dict[str, object] = {
+        "id": str(getattr(shift, "id", "")) if shift else None,
+        "name": shift_name,
+        "start_time": _fmt_time(shift_start_time),
+        "end_time": _fmt_time(shift_end_time),
+        "window_start": _local_iso(allowed_start),
+        "window_end": _local_iso(allowed_end),
+        "within_shift": bool(within_shift) if within_shift is not None else None,
+    }
+
+    if assignment is not None:
+        payload.update({
+            "assignment_id": str(assignment.id),
+            "assignment_location_id": str(assignment.location_id) if assignment.location_id else None,
+            "assignment_location_name": getattr(assignment.location, "name", None) if assignment.location else None,
+        })
+    if location is not None:
+        payload["location_id"] = str(location.id)
+        if assignment is not None and assignment.location_id:
+            payload["matches_location"] = bool(assignment.location_id == location.id)
+        elif "matches_location" not in payload:
+            payload["matches_location"] = True
+
+    return payload
 
 
 def _send_geofence_alert(
@@ -787,6 +855,17 @@ class AttendanceCheckAPIView(APIView):
          monitoring_outside_seconds,
          monitoring_rule,
          monitoring_config) = _monitoring_details(location)
+        current_shift_obj = ser.validated_data.get("current_shift")
+        current_assignment = ser.validated_data.get("current_assignment")
+        shift_payload = _build_shift_payload(
+            employee=employee,
+            shift=current_shift_obj,
+            assignment=current_assignment,
+            allowed_start=ser.validated_data.get("shift_window_start"),
+            allowed_end=ser.validated_data.get("shift_window_end"),
+            location=location,
+            within_shift=ser.validated_data.get("shift_within_window"),
+        )
         violation_flag = bool(ser.validated_data.get("violation", False))
         violation_reason = ser.validated_data.get("violation_reason")
         violation_codes = list(ser.validated_data.get("violation_codes") or [])
@@ -806,7 +885,10 @@ class AttendanceCheckAPIView(APIView):
                 reason_code="business_rule_violation",
                 start=start_dt, end=end_dt, now=now_local,
                 monitoring=monitoring_payload,
-                extra={"should_monitor_location": monitoring_active},
+                extra={
+                    "should_monitor_location": monitoring_active,
+                    "shift": shift_payload,
+                },
             )
 
         # ===== تنفيذ الإجراءات =====
@@ -823,7 +905,10 @@ class AttendanceCheckAPIView(APIView):
                     reason_code="already_checked_in",
                     start=start_dt, end=end_dt, now=now_local,
                     monitoring=monitoring_payload,
-                    extra={"should_monitor_location": monitoring_active},
+                    extra={
+                        "should_monitor_location": monitoring_active,
+                        "shift": shift_payload,
+                    },
                 )
 
             # منع تعدد الحضور في نفس اليوم
@@ -840,7 +925,10 @@ class AttendanceCheckAPIView(APIView):
                     reason_code="already_checked_in_today",
                     start=start_dt, end=end_dt, now=now_local,
                     monitoring=monitoring_payload,
-                    extra={"should_monitor_location": monitoring_active},
+                    extra={
+                        "should_monitor_location": monitoring_active,
+                        "shift": shift_payload,
+                    },
                 )
 
             # إنشاء السجل
@@ -915,7 +1003,10 @@ class AttendanceCheckAPIView(APIView):
                     reason_code="early_checkout_done",
                     start=start_dt, end=end_dt, now=now_local,
                     monitoring=monitoring_payload,
-                    extra={"should_monitor_location": monitoring_active},
+                    extra={
+                        "should_monitor_location": monitoring_active,
+                        "shift": shift_payload,
+                    },
                 )
 
             rec = (AttendanceRecord.objects
@@ -927,7 +1018,10 @@ class AttendanceCheckAPIView(APIView):
                     detail="لا يوجد سجل حضور مفتوح لإقفاله.",
                     reason_code="no_open_record",
                     monitoring=monitoring_payload,
-                    extra={"should_monitor_location": monitoring_active},
+                    extra={
+                        "should_monitor_location": monitoring_active,
+                        "shift": shift_payload,
+                    },
                 )
 
             rec.check_out_time = now_local
@@ -1015,7 +1109,10 @@ class AttendanceCheckAPIView(APIView):
                     reason_code="early_checkout_once_per_day",
                     start=start_dt, end=end_dt, now=now_local,
                     monitoring=monitoring_payload,
-                    extra={"should_monitor_location": monitoring_active},
+                    extra={
+                        "should_monitor_location": monitoring_active,
+                        "shift": shift_payload,
+                    },
                 )
 
             reason_txt = (request.data.get("early_reason") or "").strip()
@@ -1026,7 +1123,10 @@ class AttendanceCheckAPIView(APIView):
                     detail="يجب كتابة سبب الانصراف المبكر.",
                     reason_code="early_checkout_reason_required",
                     monitoring=monitoring_payload,
-                    extra={"should_monitor_location": monitoring_active},
+                    extra={
+                        "should_monitor_location": monitoring_active,
+                        "shift": shift_payload,
+                    },
                 )
 
             rec.check_out_time = now_local
@@ -1097,7 +1197,10 @@ class AttendanceCheckAPIView(APIView):
             detail="إجراء غير مدعوم.",
             reason_code="unsupported_action",
             monitoring=monitoring_payload,
-            extra={"should_monitor_location": monitoring_active},
+            extra={
+                "should_monitor_location": monitoring_active,
+                "shift": shift_payload,
+            },
         )
 
 
@@ -1705,6 +1808,18 @@ class AttendanceLastForMeView(APIView):
             "next_ping_seconds": next_ping_seconds,
         }
 
+        shift_payload = _build_shift_payload(
+            employee=employee_obj,
+            shift=getattr(record, "shift", None),
+            assignment=None,
+            allowed_start=shift_start,
+            allowed_end=shift_end,
+            location=location_obj,
+            within_shift=within_shift,
+        )
+        if shift_payload:
+            payload["shift"] = shift_payload
+
         # معلومات إضافية عن الموظف والموقع إن توفرت
         if employee_obj:
             payload["employee"] = getattr(employee_obj, "full_name", None)
@@ -1776,6 +1891,16 @@ class AttendanceLastForMeView(APIView):
 
         effective_local = self._effective_local_datetime(rec)
         now_local = _local_dt(dj_timezone.now())
+        shift_start, shift_end = self._shift_window(rec)
+        shift_payload = _build_shift_payload(
+            employee=emp,
+            shift=getattr(rec, "shift", None),
+            assignment=None,
+            allowed_start=shift_start,
+            allowed_end=shift_end,
+            location=getattr(rec, "location", None),
+            within_shift=None,
+        )
         if not effective_local or (now_local and effective_local.date() != now_local.date()):
             return Response(
                 {
@@ -1788,6 +1913,7 @@ class AttendanceLastForMeView(APIView):
                     "monitoring": monitoring_payload_raw,
                     "violation_warning_minutes": monitoring_grace_minutes_raw,
                     "next_ping_seconds": monitoring_ping_seconds_raw,
+                    "shift": shift_payload,
                 },
                 status=status.HTTP_200_OK,
             )
