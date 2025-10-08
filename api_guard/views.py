@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+# تعديل لوقت ارسال النبضات وتحققات
 import datetime as dt
 import hashlib
 import secrets
@@ -1438,7 +1438,31 @@ class AttendanceLastForMeView(APIView):
 
         return start, end
 
-    def _serialize_record(self, record: AttendanceRecord) -> dict[str, object]:
+    @staticmethod
+    def _effective_local_datetime(record: AttendanceRecord) -> Optional[dt.datetime]:
+        """
+        يحدد أفضل طابع زمني محلي لآخر إجراء مرتبط بالسجل.
+        """
+        candidates = [
+            getattr(record, "timestamp", None),
+            getattr(record, "updated_at", None),
+            getattr(record, "check_out_time", None),
+            getattr(record, "check_in_time", None),
+            getattr(record, "created_at", None),
+        ]
+        for candidate in candidates:
+            local_dt = _local_dt(candidate)
+            if local_dt:
+                return local_dt
+        return None
+
+    def _serialize_record(
+        self,
+        record: AttendanceRecord,
+        *,
+        effective_local: Optional[dt.datetime] = None,
+        now_local: Optional[dt.datetime] = None,
+    ) -> dict[str, object]:
         """
         يثري بيانات السجل الأخير لتتضمن مفاتيح مفهومة لتطبيق الهاتف.
         """
@@ -1455,6 +1479,8 @@ class AttendanceLastForMeView(APIView):
         )
 
         shift_start, shift_end = self._shift_window(record)
+        shift_start_local = _local_dt(shift_start) if shift_start else None
+        shift_end_local = _local_dt(shift_end) if shift_end else None
 
         action_labels = {
             "check_in": "الحضور",
@@ -1464,10 +1490,31 @@ class AttendanceLastForMeView(APIView):
         action_label = action_labels.get(action, action)
         detail_msg = f"آخر تسجيل: {action_label}."
 
-        recorded_at_iso = _local_iso(recorded_at)
+        recorded_at_local = _local_dt(recorded_at)
+        recorded_at_iso = recorded_at_local.isoformat() if recorded_at_local else None
         timestamp_iso = _local_iso(record.timestamp) if record.timestamp else None
-        shift_start_iso = _local_iso(shift_start) if shift_start else None
-        shift_end_iso = _local_iso(shift_end) if shift_end else None
+        shift_start_iso = shift_start_local.isoformat() if shift_start_local else None
+        shift_end_iso = shift_end_local.isoformat() if shift_end_local else None
+
+        effective_local = effective_local or self._effective_local_datetime(record)
+        now_local = now_local or _local_dt(dj_timezone.now())
+        is_today = (
+            bool(effective_local and now_local)
+            and effective_local.date() == now_local.date()
+        )
+        within_shift = True
+        if shift_start_local and shift_end_local and now_local:
+            within_shift = shift_start_local <= now_local <= shift_end_local
+        elif shift_start_local or shift_end_local:
+            within_shift = True  # تم تحديد أحد حدود الوردية فقط، نعتبره ضمن الوردية
+        else:
+            within_shift = True  # وردية غير مقيّدة
+        should_monitor = (
+            is_today
+            and within_shift
+            and action == "check_in"
+            and getattr(record, "check_out_time", None) is None
+        )
 
         payload: dict[str, object] = {
             "ok": True,
@@ -1487,6 +1534,11 @@ class AttendanceLastForMeView(APIView):
             "unrestricted": shift_start is None and shift_end is None,
             "shift_window_start": shift_start_iso,
             "shift_window_end": shift_end_iso,
+            "effective_recorded_at": effective_local.isoformat() if effective_local else recorded_at_iso,
+            "is_today": is_today,
+            "within_shift": within_shift,
+            "should_monitor_location": should_monitor,
+            "violation": record.is_violation,
         }
 
         # معلومات إضافية عن الموظف والموقع إن توفرت
@@ -1503,6 +1555,32 @@ class AttendanceLastForMeView(APIView):
             location_id = getattr(location_obj, "id", None)
             if location_id is not None:
                 payload["location_id"] = str(location_id)
+
+        last_ping = (
+            LocationPing.objects
+            .filter(employee=employee_obj)
+            .order_by("-recorded_at")
+            .first()
+            if employee_obj
+            else None
+        )
+        if last_ping:
+            last_ping_local = _local_dt(last_ping.recorded_at)
+            payload["last_location_ping"] = {
+                "recorded_at": last_ping.recorded_at.isoformat(),
+                "recorded_at_local": last_ping_local.isoformat() if last_ping_local else None,
+                "latitude": last_ping.latitude,
+                "longitude": last_ping.longitude,
+                "accuracy": last_ping.accuracy,
+                "distance_m": last_ping.distance_m,
+                "within_radius": last_ping.within_radius,
+                "violation_triggered": last_ping.violation_triggered,
+                "is_today": (
+                    last_ping_local.date() == now_local.date()
+                    if last_ping_local and now_local
+                    else None
+                ),
+            }
 
         combined = dict(base)
         combined.update(payload)
@@ -1524,7 +1602,22 @@ class AttendanceLastForMeView(APIView):
         if not rec:
             return Response(status=status.HTTP_204_NO_CONTENT)
 
-        data = self._serialize_record(rec)
+        effective_local = self._effective_local_datetime(rec)
+        now_local = _local_dt(dj_timezone.now())
+        if not effective_local or (now_local and effective_local.date() != now_local.date()):
+            return Response(
+                {
+                    "ok": False,
+                    "detail": "لا يوجد سجل حضور لهذا اليوم.",
+                    "message": "لا يوجد سجل حضور لهذا اليوم.",
+                    "latest_record_id": str(rec.id),
+                    "latest_record_action": self._determine_action(rec),
+                    "latest_recorded_at": effective_local.isoformat() if effective_local else _local_iso(rec.timestamp),
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        data = self._serialize_record(rec, effective_local=effective_local, now_local=now_local)
         return Response(data, status=status.HTTP_200_OK)
 
 
