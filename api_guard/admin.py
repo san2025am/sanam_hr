@@ -6,7 +6,8 @@ from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.contrib.contenttypes.models import ContentType
 
 from .models import (
-    EmployeeShiftAssignment, Role, User, Employee, Location, EmployeeLocationAssignment, Task, Shift,
+    EmployeeShiftAssignment, Role, User, Employee, Location, LocationMonitoringConfig,
+    EmployeeLocationAssignment, Task, Shift,
     AttendanceRecord, LocationPing, Salary, Report, ReportAttachment, Request, EmployeeLeaveBalance,
     ViolationRule, EmployeeViolation,  # <-- الجديد بدل Violation
     Contract, Advance, Custody, LogisticRequest,
@@ -237,6 +238,25 @@ class LocationAdmin(admin.ModelAdmin):
             "description": "يمكن لصق رابط Google Maps في gps_coordinates أو إدخال lat,lng مباشرة. لتحديد حدود دقيقة، فعّل المضلّع وأدخل النقاط سطرًا-سطرًا."
         }),
         ("تعليمات", {"fields": ("instructions",)}),
+    )
+
+
+@admin.register(LocationMonitoringConfig)
+class LocationMonitoringConfigAdmin(admin.ModelAdmin):
+    list_display = (
+        "location",
+        "is_active",
+        "ping_interval_seconds",
+        "violation_grace_minutes",
+        "violation_rule",
+    )
+    list_filter = ("is_active", "violation_rule")
+    search_fields = ("location__name", "location__client_name")
+    autocomplete_fields = ("location", "violation_rule")
+    fieldsets = (
+        (None, {"fields": ("location", "is_active")}),
+        ("التتبع", {"fields": ("ping_interval_seconds", "violation_grace_minutes")}),
+        ("المخالفة", {"fields": ("violation_rule", "notes")}),
     )
 
 

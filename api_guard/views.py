@@ -42,6 +42,7 @@ from .models import (
     ViolationRule,
     EmployeeViolation,
     LocationPing,
+    LocationMonitoringConfig,
 )
 from .serializers import (
     GUARD_ROLE_NAMES,
@@ -136,6 +137,58 @@ def _local_iso(dt_value):
     return local.isoformat() if local else None
 
 
+def _monitoring_details(
+    location,
+) -> tuple[dict[str, object], bool, int, Optional[int], Optional[int], Optional[ViolationRule], Optional[LocationMonitoringConfig]]:
+    """
+    يعيد (payload, active, grace_minutes, ping_seconds, outside_seconds, rule, config).
+    """
+    config: Optional[LocationMonitoringConfig] = None
+    rule: Optional[ViolationRule] = None
+    active = False
+    ping_seconds: Optional[int] = None
+    grace_minutes = GEOFENCE_WARNING_MINUTES
+
+    if location:
+        try:
+            config = location.monitoring_config  # type: ignore[attr-defined]
+        except LocationMonitoringConfig.DoesNotExist:
+            config = None
+
+    if config:
+        rule = getattr(config, "violation_rule", None)
+        active = bool(config.is_active)
+        if active:
+            ping_val = int(config.ping_interval_seconds or 0)
+            ping_seconds = ping_val if ping_val > 0 else None
+            grace_val = int(config.violation_grace_minutes or 0)
+            if grace_val > 0:
+                grace_minutes = grace_val
+        else:
+            ping_seconds = None
+
+    outside_seconds: Optional[int] = None
+    if ping_seconds:
+        outside_seconds = max(60, ping_seconds // 2 or 1)
+
+    payload: dict[str, object] = {
+        "active": active,
+        "violation_grace_minutes": grace_minutes,
+        "default_violation_grace_minutes": GEOFENCE_WARNING_MINUTES,
+    }
+    if ping_seconds:
+        payload["ping_interval_seconds"] = ping_seconds
+    if outside_seconds:
+        payload["suggested_outside_ping_seconds"] = outside_seconds
+    if config:
+        payload["config_id"] = str(config.id)
+    if rule:
+        payload["violation_rule_id"] = str(rule.id)
+        payload["violation_rule_title"] = rule.title
+        payload["violation_rule_action"] = rule.default_action
+    return payload, active, grace_minutes, ping_seconds, outside_seconds, rule, config
+
+
 def _send_geofence_alert(
     *,
     employee: Employee,
@@ -146,6 +199,7 @@ def _send_geofence_alert(
     outside_minutes: Optional[float],
     deduction_percent: Optional[Decimal],
     deduction_value: Optional[Decimal],
+    warning_minutes: Optional[int] = None,
 ) -> None:
     location_name = getattr(location, "name", "الموقع المحدد") if location else "الموقع المحدد"
     client_name = getattr(location, "client_name", "") if location else ""
@@ -164,6 +218,7 @@ def _send_geofence_alert(
             f" بقيمة {_format_decimal(deduction_value)}."
         )
 
+    limit_minutes = warning_minutes or GEOFENCE_WARNING_MINUTES
     message = (
         f"تنبيه مخالفة موقع للحارس {employee.full_name}."
         f" السبب: {reason or 'خارج نطاق الموقع'}."
@@ -173,7 +228,7 @@ def _send_geofence_alert(
         message = f"{message} - العميل: {client_name}"
     message = (
         f"{message}. المسافة الحالية عن مركز الموقع {distance_txt} مقابل نطاق مسموح {radius_txt}."
-        f"{duration_txt} يجب عدم تجاوز {GEOFENCE_WARNING_MINUTES} دقيقة خارج النطاق."
+        f"{duration_txt} يجب عدم تجاوز {limit_minutes} دقيقة خارج النطاق."
         f"{deduction_txt}"
     )
 
@@ -221,6 +276,8 @@ def record_geofence_violation(
     codes: Sequence[str] | None,
     outside_minutes: Optional[float],
     attendance_record: Optional[AttendanceRecord] = None,
+    warning_minutes: Optional[int] = None,
+    violation_rule: Optional[ViolationRule] = None,
 ) -> EmployeeViolation:
     summary = reason or "تم رصد خروج عن نطاق الموقع المحدد."
     dist_text = f"{round(distance or 0.0, 2)}م"
@@ -229,29 +286,31 @@ def record_geofence_violation(
     if outside_minutes is not None:
         duration_text = f"{int(round(outside_minutes))} دقيقة تقريباً"
 
-    rule, _ = ViolationRule.objects.get_or_create(
-        title=GEOFENCE_RULE_TITLE,
-        defaults={
-            "description": GEOFENCE_RULE_DESCRIPTION,
-            "default_action": "deduct" if GEOFENCE_DEDUCTION_PERCENT > 0 else "warn",
-            "default_deduction_percent": GEOFENCE_DEDUCTION_PERCENT,
-        },
-    )
-    rule_percent = _decimal_or_zero(getattr(rule, "default_deduction_percent", None))
+    rule_obj = violation_rule
+    if rule_obj is None:
+        rule_obj, _created = ViolationRule.objects.get_or_create(
+            title=GEOFENCE_RULE_TITLE,
+            defaults={
+                "description": GEOFENCE_RULE_DESCRIPTION,
+                "default_action": "deduct" if GEOFENCE_DEDUCTION_PERCENT > 0 else "warn",
+                "default_deduction_percent": GEOFENCE_DEDUCTION_PERCENT,
+            },
+        )
+    rule_percent = _decimal_or_zero(getattr(rule_obj, "default_deduction_percent", None))
     deduction_percent = rule_percent if rule_percent > 0 else GEOFENCE_DEDUCTION_PERCENT
     deduction_value = _apply_geofence_salary_deduction(employee, deduction_percent)
     if deduction_value <= 0:
         deduction_percent = Decimal("0")
     else:
         updates = {}
-        if rule.default_action != "deduct":
+        if rule_obj.default_action != "deduct":
             updates["default_action"] = "deduct"
         if rule_percent <= 0 and deduction_percent > 0:
             updates["default_deduction_percent"] = deduction_percent
         if updates:
             for field, value in updates.items():
-                setattr(rule, field, value)
-            rule.save(update_fields=list(updates.keys()))
+                setattr(rule_obj, field, value)
+            rule_obj.save(update_fields=list(updates.keys()))
 
     if attendance_record:
         note_parts = []
@@ -271,7 +330,7 @@ def record_geofence_violation(
         attendance_record.save(update_fields=["notes", "is_violation"])
 
     warning_level = (
-        EmployeeViolation.objects.filter(employee=employee, rule=rule).count() + 1
+        EmployeeViolation.objects.filter(employee=employee, rule=rule_obj).count() + 1
     )
 
     description = f"{summary} المسافة الحالية {dist_text} (النطاق {radius_text})."
@@ -287,7 +346,7 @@ def record_geofence_violation(
 
     violation = EmployeeViolation.objects.create(
         employee=employee,
-        rule=rule,
+        rule=rule_obj,
         reported_by=getattr(employee, "supervisor", None),
         location=location,
         description=description,
@@ -304,6 +363,7 @@ def record_geofence_violation(
         outside_minutes=outside_minutes,
         deduction_percent=deduction_percent if deduction_percent > 0 else None,
         deduction_value=deduction_value if deduction_value > 0 else None,
+        warning_minutes=warning_minutes,
     )
     return violation
 
@@ -649,7 +709,7 @@ class AttendanceCheckAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def _deny(self, *, action, detail, reason_code,
-              start=None, end=None, now=None, extra=None):
+              start=None, end=None, now=None, extra=None, monitoring=None):
         payload = {
             "ok": False,
             "performed": False,
@@ -663,6 +723,8 @@ class AttendanceCheckAPIView(APIView):
         if now   is not None: wnd["now"]  = now
         if wnd: payload["window"] = wnd
         if extra: payload.update(extra)
+        if monitoring is not None:
+            payload["monitoring"] = monitoring
         return Response(payload, status=status.HTTP_200_OK)
 
     def post(self, request):
@@ -718,6 +780,13 @@ class AttendanceCheckAPIView(APIView):
         radius    = ser.validated_data.get("location_radius_m")
         center_lat = ser.validated_data.get("location_center_lat")
         center_lng = ser.validated_data.get("location_center_lng")
+        (monitoring_payload,
+         monitoring_active,
+         monitoring_grace_minutes,
+         monitoring_ping_seconds,
+         monitoring_outside_seconds,
+         monitoring_rule,
+         monitoring_config) = _monitoring_details(location)
         violation_flag = bool(ser.validated_data.get("violation", False))
         violation_reason = ser.validated_data.get("violation_reason")
         violation_codes = list(ser.validated_data.get("violation_codes") or [])
@@ -735,7 +804,8 @@ class AttendanceCheckAPIView(APIView):
                 action=action,
                 detail=reason or "⚠️ لا يمكن تنفيذ العملية في الوقت الحالي.",
                 reason_code="business_rule_violation",
-                start=start_dt, end=end_dt, now=now_local
+                start=start_dt, end=end_dt, now=now_local,
+                monitoring=monitoring_payload,
             )
 
         # ===== تنفيذ الإجراءات =====
@@ -750,7 +820,8 @@ class AttendanceCheckAPIView(APIView):
                     action=action,
                     detail="⚠️ تم تسجيل حضور مسبقًا، لا يمكن تسجيل حضور آخر قبل الانصراف.",
                     reason_code="already_checked_in",
-                    start=start_dt, end=end_dt, now=now_local
+                    start=start_dt, end=end_dt, now=now_local,
+                    monitoring=monitoring_payload,
                 )
 
             # منع تعدد الحضور في نفس اليوم
@@ -765,7 +836,8 @@ class AttendanceCheckAPIView(APIView):
                     action=action,
                     detail="⚠️ تم تسجيل حضور مسبقًا اليوم.",
                     reason_code="already_checked_in_today",
-                    start=start_dt, end=end_dt, now=now_local
+                    start=start_dt, end=end_dt, now=now_local,
+                    monitoring=monitoring_payload,
                 )
 
             # إنشاء السجل
@@ -792,6 +864,8 @@ class AttendanceCheckAPIView(APIView):
                     codes=violation_codes,
                     outside_minutes=None,
                     attendance_record=rec,
+                    warning_minutes=monitoring_grace_minutes,
+                    violation_rule=monitoring_rule,
                 )
                 violation_escalated = True
             return Response({
@@ -816,9 +890,10 @@ class AttendanceCheckAPIView(APIView):
                 "violation": violation_flag,
                 "violation_reason": violation_reason,
                 "violation_codes": violation_codes,
-                "violation_warning_minutes": GEOFENCE_WARNING_MINUTES,
+                "violation_warning_minutes": monitoring_grace_minutes,
                 "violation_outside_minutes": None,
                 "violation_escalated": violation_escalated,
+                "monitoring": monitoring_payload,
             }, status=status.HTTP_201_CREATED)
 
         elif action == "check_out":
@@ -834,14 +909,20 @@ class AttendanceCheckAPIView(APIView):
                     action=action,
                     detail="⚠️ تم تسجيل انصراف مبكر اليوم؛ لا يمكن الانصراف العادي.",
                     reason_code="early_checkout_done",
-                    start=start_dt, end=end_dt, now=now_local
+                    start=start_dt, end=end_dt, now=now_local,
+                    monitoring=monitoring_payload,
                 )
 
             rec = (AttendanceRecord.objects
                    .filter(employee=employee, check_out_time__isnull=True)
                    .order_by("-check_in_time").first())
             if not rec:
-                return self._deny(action=action, detail="لا يوجد سجل حضور مفتوح لإقفاله.", reason_code="no_open_record")
+                return self._deny(
+                    action=action,
+                    detail="لا يوجد سجل حضور مفتوح لإقفاله.",
+                    reason_code="no_open_record",
+                    monitoring=monitoring_payload,
+                )
 
             rec.check_out_time = now_local
             rec.notes = (rec.notes or "") + f" | out lat={lat}, lng={lng}, acc={acc}, dist={round(dist, 2)}"
@@ -856,7 +937,7 @@ class AttendanceCheckAPIView(APIView):
             violation_outside_minutes = None
             if violation_flag and rec.check_in_time:
                 violation_outside_minutes = (now_local - rec.check_in_time).total_seconds() / 60.0
-                if violation_outside_minutes >= GEOFENCE_WARNING_MINUTES:
+                if violation_outside_minutes >= monitoring_grace_minutes:
                     record_geofence_violation(
                         employee=employee,
                         location=rec.location or location,
@@ -866,6 +947,8 @@ class AttendanceCheckAPIView(APIView):
                         codes=violation_codes,
                         outside_minutes=violation_outside_minutes,
                         attendance_record=rec,
+                        warning_minutes=monitoring_grace_minutes,
+                        violation_rule=monitoring_rule,
                     )
                     violation_escalated = True
 
@@ -892,9 +975,10 @@ class AttendanceCheckAPIView(APIView):
                 "violation": violation_flag,
                 "violation_reason": violation_reason,
                 "violation_codes": violation_codes,
-                "violation_warning_minutes": GEOFENCE_WARNING_MINUTES,
+                "violation_warning_minutes": monitoring_grace_minutes,
                 "violation_outside_minutes": violation_outside_minutes,
                 "violation_escalated": violation_escalated,
+                "monitoring": monitoring_payload,
             }, status=status.HTTP_200_OK)
 
         elif action == "early_check_out":
@@ -903,7 +987,12 @@ class AttendanceCheckAPIView(APIView):
                    .filter(employee=employee, check_out_time__isnull=True)
                    .order_by("-check_in_time").first())
             if not rec:
-                return self._deny(action=action, detail="لا يوجد سجل حضور مفتوح لإقفاله.", reason_code="no_open_record")
+                return self._deny(
+                    action=action,
+                    detail="لا يوجد سجل حضور مفتوح لإقفاله.",
+                    reason_code="no_open_record",
+                    monitoring=monitoring_payload,
+                )
 
             # مرّة واحدة يوميًا
             today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -917,13 +1006,19 @@ class AttendanceCheckAPIView(APIView):
                     action=action,
                     detail="⚠️ تم تسجيل انصراف مبكر مسبقًا اليوم.",
                     reason_code="early_checkout_once_per_day",
-                    start=start_dt, end=end_dt, now=now_local
+                    start=start_dt, end=end_dt, now=now_local,
+                    monitoring=monitoring_payload,
                 )
 
             reason_txt = (request.data.get("early_reason") or "").strip()
             file_obj   = request.FILES.get("early_attachment")
             if not reason_txt:
-                return self._deny(action=action, detail="يجب كتابة سبب الانصراف المبكر.", reason_code="early_checkout_reason_required")
+                return self._deny(
+                    action=action,
+                    detail="يجب كتابة سبب الانصراف المبكر.",
+                    reason_code="early_checkout_reason_required",
+                    monitoring=monitoring_payload,
+                )
 
             rec.check_out_time = now_local
             rec.early_checkout = True
@@ -944,7 +1039,7 @@ class AttendanceCheckAPIView(APIView):
             violation_outside_minutes = None
             if violation_flag and rec.check_in_time:
                 violation_outside_minutes = (now_local - rec.check_in_time).total_seconds() / 60.0
-                if violation_outside_minutes >= GEOFENCE_WARNING_MINUTES:
+                if violation_outside_minutes >= monitoring_grace_minutes:
                     record_geofence_violation(
                         employee=employee,
                         location=rec.location or location,
@@ -954,6 +1049,8 @@ class AttendanceCheckAPIView(APIView):
                         codes=violation_codes,
                         outside_minutes=violation_outside_minutes,
                         attendance_record=rec,
+                        warning_minutes=monitoring_grace_minutes,
+                        violation_rule=monitoring_rule,
                     )
                     violation_escalated = True
 
@@ -979,12 +1076,13 @@ class AttendanceCheckAPIView(APIView):
                 "violation": violation_flag,
                 "violation_reason": violation_reason,
                 "violation_codes": violation_codes,
-                "violation_warning_minutes": GEOFENCE_WARNING_MINUTES,
+                "violation_warning_minutes": monitoring_grace_minutes,
                 "violation_outside_minutes": violation_outside_minutes,
                 "violation_escalated": violation_escalated,
+                "monitoring": monitoring_payload,
             }, status=status.HTTP_200_OK)
 
-        return self._deny(action=action, detail="إجراء غير مدعوم.", reason_code="unsupported_action")
+        return self._deny(action=action, detail="إجراء غير مدعوم.", reason_code="unsupported_action", monitoring=monitoring_payload)
 
 
 class ResolveLocationAPIView(APIView):
@@ -1014,6 +1112,13 @@ class ResolveLocationAPIView(APIView):
             radius = float(loc.gps_radius)
         except (TypeError, ValueError):
             radius = None
+        (monitoring_payload,
+         monitoring_active,
+         monitoring_grace_minutes,
+         monitoring_ping_seconds,
+         monitoring_outside_seconds,
+         monitoring_rule,
+         monitoring_config) = _monitoring_details(loc)
         data = {
             "detail": "تم تحديد الموقع" if within_radius else "تم العثور على أقرب موقع لكنك خارج النطاق.",
             "location_id": str(loc.id),
@@ -1024,6 +1129,9 @@ class ResolveLocationAPIView(APIView):
             "distance": round(dist, 2),
             "mode": mode,  # polygon | radius
             "within_radius": within_radius,
+            "monitoring": monitoring_payload,
+            "violation_grace_minutes": monitoring_grace_minutes,
+            "should_monitor_location": monitoring_active,
         }
         return Response(data, status=status.HTTP_200_OK)
 
@@ -1060,6 +1168,13 @@ class LocationPingAPIView(APIView):
                 center_lat, center_lng = [float(x.strip()) for x in loc.gps_coordinates.split(",", 1)]
             except Exception:
                 pass
+        (monitoring_payload,
+         monitoring_active,
+         monitoring_grace_minutes,
+         monitoring_ping_seconds,
+         monitoring_outside_seconds,
+         monitoring_rule,
+         monitoring_config) = _monitoring_details(loc)
 
         ping = LocationPing.objects.create(
             employee=employee,
@@ -1104,7 +1219,7 @@ class LocationPingAPIView(APIView):
                 outside_start = recorded_at
             outside_minutes = max(0.0, (recorded_at - outside_start).total_seconds() / 60.0)
 
-            if outside_minutes >= GEOFENCE_WARNING_MINUTES:
+            if outside_minutes >= monitoring_grace_minutes:
                 existing_violation = LocationPing.objects.filter(
                     employee=employee,
                     violation_triggered=True,
@@ -1120,10 +1235,20 @@ class LocationPingAPIView(APIView):
                         codes=violation_codes,
                         outside_minutes=outside_minutes,
                         attendance_record=None,
+                        warning_minutes=monitoring_grace_minutes,
+                        violation_rule=monitoring_rule,
                     )
                     ping.violation_triggered = True
                     ping.save(update_fields=["violation_triggered"])
                     violation_triggered = True
+
+        next_ping_seconds = None
+        if monitoring_active:
+            base_next = monitoring_ping_seconds
+            outside_next = monitoring_outside_seconds or monitoring_ping_seconds
+            candidate = base_next if within_radius else outside_next
+            if candidate and candidate > 0:
+                next_ping_seconds = candidate
 
         data = {
             "ok": True,
@@ -1144,6 +1269,10 @@ class LocationPingAPIView(APIView):
             "violation_triggered": violation_triggered,
             "outside_minutes": outside_minutes,
             "recorded_at": _local_iso(recorded_at),
+            "violation_warning_minutes": monitoring_grace_minutes,
+            "monitoring": monitoring_payload,
+            "should_monitor_location": monitoring_active,
+            "next_ping_seconds": next_ping_seconds,
         }
         return Response(data, status=status.HTTP_200_OK)
 
@@ -1470,6 +1599,14 @@ class AttendanceLastForMeView(APIView):
         location_obj = getattr(record, "location", None)
         employee_obj = getattr(record, "employee", None)
 
+        (monitoring_payload,
+         monitoring_active,
+         monitoring_grace_minutes,
+         monitoring_ping_seconds,
+         monitoring_outside_seconds,
+         monitoring_rule,
+         monitoring_config) = _monitoring_details(location_obj)
+
         action = self._determine_action(record)
         recorded_at = (
             record.timestamp
@@ -1510,11 +1647,19 @@ class AttendanceLastForMeView(APIView):
         else:
             within_shift = True  # وردية غير مقيّدة
         should_monitor = (
-            is_today
+            monitoring_active
+            and is_today
             and within_shift
             and action == "check_in"
             and getattr(record, "check_out_time", None) is None
         )
+        next_ping_seconds = None
+        if monitoring_active:
+            base_next = monitoring_ping_seconds
+            outside_next = monitoring_outside_seconds or monitoring_ping_seconds
+            candidate = base_next if within_shift else outside_next
+            if candidate and candidate > 0:
+                next_ping_seconds = candidate
 
         payload: dict[str, object] = {
             "ok": True,
@@ -1539,6 +1684,9 @@ class AttendanceLastForMeView(APIView):
             "within_shift": within_shift,
             "should_monitor_location": should_monitor,
             "violation": record.is_violation,
+            "violation_warning_minutes": monitoring_grace_minutes,
+            "monitoring": monitoring_payload,
+            "next_ping_seconds": next_ping_seconds,
         }
 
         # معلومات إضافية عن الموظف والموقع إن توفرت
@@ -1602,6 +1750,14 @@ class AttendanceLastForMeView(APIView):
         if not rec:
             return Response(status=status.HTTP_204_NO_CONTENT)
 
+        (monitoring_payload_raw,
+         _monitoring_active_raw,
+         monitoring_grace_minutes_raw,
+         monitoring_ping_seconds_raw,
+         monitoring_outside_seconds_raw,
+         _monitoring_rule_raw,
+         _monitoring_config_raw) = _monitoring_details(getattr(rec, "location", None))
+
         effective_local = self._effective_local_datetime(rec)
         now_local = _local_dt(dj_timezone.now())
         if not effective_local or (now_local and effective_local.date() != now_local.date()):
@@ -1613,6 +1769,9 @@ class AttendanceLastForMeView(APIView):
                     "latest_record_id": str(rec.id),
                     "latest_record_action": self._determine_action(rec),
                     "latest_recorded_at": effective_local.isoformat() if effective_local else _local_iso(rec.timestamp),
+                    "monitoring": monitoring_payload_raw,
+                    "violation_warning_minutes": monitoring_grace_minutes_raw,
+                    "next_ping_seconds": monitoring_ping_seconds_raw,
                 },
                 status=status.HTTP_200_OK,
             )

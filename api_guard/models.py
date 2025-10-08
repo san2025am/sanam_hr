@@ -157,6 +157,45 @@ class Location(BaseModel):
         verbose_name_plural = "4. المواقع"
 
 
+class LocationMonitoringConfig(BaseModel):
+    """
+    ضبط فترات تتبع الموقع وآلية تسجيل المخالفة لكل موقع.
+    """
+
+    location = models.OneToOneField(
+        Location,
+        on_delete=models.CASCADE,
+        related_name="monitoring_config",
+        verbose_name="الموقع",
+    )
+    is_active = models.BooleanField(default=True, verbose_name="مفعل؟")
+    ping_interval_seconds = models.PositiveIntegerField(
+        default=300,
+        verbose_name="الفاصل الزمني للتتبع (ثواني)",
+        help_text="المدة بين كل إرسال إحداثيات من تطبيق الحارس.",
+    )
+    violation_grace_minutes = models.PositiveIntegerField(
+        default=5,
+        verbose_name="مدة السماح قبل تسجيل المخالفة (دقائق)",
+        help_text="إذا تجاوز الابتعاد هذه المدة تُنشأ مخالفة تلقائيًا.",
+    )
+    violation_rule = models.ForeignKey(
+        'api_guard.ViolationRule',
+        on_delete=models.PROTECT,
+        related_name="location_monitoring_configs",
+        verbose_name="المخالفة المعتمدة",
+    )
+    notes = models.TextField(blank=True, null=True, verbose_name="ملاحظات")
+
+    def __str__(self):
+        return f"ضبط مراقبة {self.location.name}"
+
+    class Meta:
+        verbose_name = "4.1 ضبط مراقبة موقع"
+        verbose_name_plural = "4.1 ضبط مراقبة المواقع"
+        ordering = ["location__name"]
+
+
 class EmployeeLocationAssignment(BaseModel):
     employee = models.ForeignKey(Employee, on_delete=models.CASCADE, verbose_name="الموظف")
     location = models.ForeignKey(Location, on_delete=models.CASCADE, verbose_name="الموقع")
