@@ -227,7 +227,7 @@ class GuardTaskUpdateSerializer(serializers.Serializer):
 class ShiftAssignmentMiniSerializer(serializers.ModelSerializer):
     shift_name    = serializers.CharField(source="shift.name", read_only=True)
     location_name = serializers.CharField(source="location.name", read_only=True)
-    location_id   = serializers.CharField(source="location_id", read_only=True, allow_null=True)
+    location_id   = serializers.CharField(read_only=True, allow_null=True)
     start_time = serializers.SerializerMethodField()
     end_time   = serializers.SerializerMethodField()
     checkin_grace        = serializers.IntegerField(read_only=True)

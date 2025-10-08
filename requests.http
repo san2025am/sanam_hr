@@ -8,8 +8,10 @@ POST {{base}}/{{prefix}}/auth/guard/login/
 Content-Type: {{json}}
 
 {
-  "username": "asma",
-  "password": "Asmg36@2022"
+  "username": "	mogahed",
+  "password": "Asmg36@2022",
+  "device_id": "1ed99ed2cdffa5f3fe4e4501a177002d7b812fde7a3723f864667b560a90244d",
+  "device_name": "Xiaomi M2006C3LC"
 }
 
 
