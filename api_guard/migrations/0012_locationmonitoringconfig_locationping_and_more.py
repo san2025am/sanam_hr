@@ -12,7 +12,7 @@ class Migration(migrations.Migration):
         ('api_guard', '0011_merge_20251008_2140'),
     ]
 
-    operations = [
+    state_operations = [
         migrations.CreateModel(
             name='LocationMonitoringConfig',
             fields=[
@@ -112,5 +112,11 @@ class Migration(migrations.Migration):
             model_name='locationping',
             name='location',
             field=models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='location_pings', to='api_guard.location', verbose_name='الموقع'),
+        ),
+    ]
+    operations = [
+        migrations.SeparateDatabaseAndState(
+            database_operations=[],
+            state_operations=state_operations,
         ),
     ]
