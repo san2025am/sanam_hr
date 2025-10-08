@@ -12,7 +12,7 @@ from typing import Optional, Sequence
 from django.conf import settings
 from django.core.mail import send_mail
 from django.utils import timezone as dj_timezone
-from django.db import IntegrityError
+from django.db import IntegrityError, DatabaseError
 from django.db.models import F, OuterRef, Subquery, Q
 from django.http import JsonResponse
 from django.shortcuts import render
@@ -155,6 +155,13 @@ def _monitoring_details(
             config = location.monitoring_config  # type: ignore[attr-defined]
         except LocationMonitoringConfig.DoesNotExist:
             config = None
+        except DatabaseError as exc:
+            logger.warning("Monitoring config unavailable for location %s: %s", getattr(location, "id", None), exc)
+            return ({
+                "active": False,
+                "violation_grace_minutes": GEOFENCE_WARNING_MINUTES,
+                "default_violation_grace_minutes": GEOFENCE_WARNING_MINUTES,
+            }, False, GEOFENCE_WARNING_MINUTES, None, None, None, None)
 
     if config:
         rule = getattr(config, "violation_rule", None)
