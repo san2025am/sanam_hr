@@ -742,7 +742,14 @@ class GuardLoginAndProfileView(APIView):
                 now=now,
             )
 
-        emp_data = EmployeeMeSerializer(employee).data
+        try:
+            emp_data = EmployeeMeSerializer(employee).data
+        except DatabaseError as exc:
+            logger.exception("Failed to serialize employee profile during guard login: %s", exc)
+            return Response({
+                "detail": "الخادم غير جاهز بالكامل. يرجى إعادة المحاولة بعد تطبيق التحديثات أو التواصل مع الدعم الفني.",
+                "code": "backend_not_ready",
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         refresh = RefreshToken.for_user(user)
         access = refresh.access_token
 
