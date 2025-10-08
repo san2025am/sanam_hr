@@ -806,6 +806,7 @@ class AttendanceCheckAPIView(APIView):
                 reason_code="business_rule_violation",
                 start=start_dt, end=end_dt, now=now_local,
                 monitoring=monitoring_payload,
+                extra={"should_monitor_location": monitoring_active},
             )
 
         # ===== تنفيذ الإجراءات =====
@@ -822,6 +823,7 @@ class AttendanceCheckAPIView(APIView):
                     reason_code="already_checked_in",
                     start=start_dt, end=end_dt, now=now_local,
                     monitoring=monitoring_payload,
+                    extra={"should_monitor_location": monitoring_active},
                 )
 
             # منع تعدد الحضور في نفس اليوم
@@ -838,6 +840,7 @@ class AttendanceCheckAPIView(APIView):
                     reason_code="already_checked_in_today",
                     start=start_dt, end=end_dt, now=now_local,
                     monitoring=monitoring_payload,
+                    extra={"should_monitor_location": monitoring_active},
                 )
 
             # إنشاء السجل
@@ -894,6 +897,7 @@ class AttendanceCheckAPIView(APIView):
                 "violation_outside_minutes": None,
                 "violation_escalated": violation_escalated,
                 "monitoring": monitoring_payload,
+                "should_monitor_location": monitoring_active,
             }, status=status.HTTP_201_CREATED)
 
         elif action == "check_out":
@@ -911,6 +915,7 @@ class AttendanceCheckAPIView(APIView):
                     reason_code="early_checkout_done",
                     start=start_dt, end=end_dt, now=now_local,
                     monitoring=monitoring_payload,
+                    extra={"should_monitor_location": monitoring_active},
                 )
 
             rec = (AttendanceRecord.objects
@@ -922,6 +927,7 @@ class AttendanceCheckAPIView(APIView):
                     detail="لا يوجد سجل حضور مفتوح لإقفاله.",
                     reason_code="no_open_record",
                     monitoring=monitoring_payload,
+                    extra={"should_monitor_location": monitoring_active},
                 )
 
             rec.check_out_time = now_local
@@ -979,6 +985,7 @@ class AttendanceCheckAPIView(APIView):
                 "violation_outside_minutes": violation_outside_minutes,
                 "violation_escalated": violation_escalated,
                 "monitoring": monitoring_payload,
+                "should_monitor_location": monitoring_active,
             }, status=status.HTTP_200_OK)
 
         elif action == "early_check_out":
@@ -1008,6 +1015,7 @@ class AttendanceCheckAPIView(APIView):
                     reason_code="early_checkout_once_per_day",
                     start=start_dt, end=end_dt, now=now_local,
                     monitoring=monitoring_payload,
+                    extra={"should_monitor_location": monitoring_active},
                 )
 
             reason_txt = (request.data.get("early_reason") or "").strip()
@@ -1018,6 +1026,7 @@ class AttendanceCheckAPIView(APIView):
                     detail="يجب كتابة سبب الانصراف المبكر.",
                     reason_code="early_checkout_reason_required",
                     monitoring=monitoring_payload,
+                    extra={"should_monitor_location": monitoring_active},
                 )
 
             rec.check_out_time = now_local
@@ -1080,9 +1089,16 @@ class AttendanceCheckAPIView(APIView):
                 "violation_outside_minutes": violation_outside_minutes,
                 "violation_escalated": violation_escalated,
                 "monitoring": monitoring_payload,
+                "should_monitor_location": monitoring_active,
             }, status=status.HTTP_200_OK)
 
-        return self._deny(action=action, detail="إجراء غير مدعوم.", reason_code="unsupported_action", monitoring=monitoring_payload)
+        return self._deny(
+            action=action,
+            detail="إجراء غير مدعوم.",
+            reason_code="unsupported_action",
+            monitoring=monitoring_payload,
+            extra={"should_monitor_location": monitoring_active},
+        )
 
 
 class ResolveLocationAPIView(APIView):
