@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import secrets
 import logging
 from datetime import timedelta
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from typing import Optional, Sequence
 
@@ -11,7 +13,7 @@ from django.conf import settings
 from django.core.mail import send_mail
 from django.utils import timezone as dj_timezone
 from django.db import IntegrityError
-from django.db.models import OuterRef, Subquery
+from django.db.models import F, OuterRef, Subquery
 from django.http import JsonResponse
 from django.shortcuts import render
 from django.contrib.admin.views.decorators import staff_member_required
@@ -67,11 +69,71 @@ User = get_user_model()
 
 logger = logging.getLogger(__name__)
 
-GEOFENCE_WARNING_MINUTES = int(getattr(settings, "GEOFENCE_OUTSIDE_WARNING_MINUTES", 2))
+# Default to 60 minutes (1 hour) so the violation aligns with the business rule
+GEOFENCE_WARNING_MINUTES = int(getattr(settings, "GEOFENCE_OUTSIDE_WARNING_MINUTES", 60))
 GEOFENCE_RULE_TITLE = "الخروج عن نطاق الموقع"
 GEOFENCE_RULE_DESCRIPTION = (
     "يتم تسجيل هذه المخالفة عند خروج الحارس عن نطاق الموقع المحدد لأكثر من المدة المسموح بها."
 )
+try:
+    GEOFENCE_DEDUCTION_PERCENT = Decimal(str(getattr(settings, "GEOFENCE_OUTSIDE_DEDUCTION_PERCENT", 2)))
+except (InvalidOperation, TypeError, ValueError):
+    GEOFENCE_DEDUCTION_PERCENT = Decimal("2")
+if GEOFENCE_DEDUCTION_PERCENT < 0:
+    GEOFENCE_DEDUCTION_PERCENT = Decimal("0")
+
+
+def _decimal_or_zero(value) -> Decimal:
+    if isinstance(value, Decimal):
+        return value
+    if value in (None, ""):
+        return Decimal("0")
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return Decimal("0")
+
+
+def _format_decimal(value: Decimal) -> str:
+    dec = _decimal_or_zero(value)
+    quantized = dec.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return format(quantized.normalize(), "f")
+
+
+def _apply_geofence_salary_deduction(employee: Employee, percent: Decimal) -> Decimal:
+    percent = _decimal_or_zero(percent)
+    if employee is None or percent <= 0:
+        return Decimal("0")
+    salary, _ = Salary.objects.get_or_create(employee=employee)
+    base = salary.base_salary or Decimal("0")
+    if base <= 0:
+        return Decimal("0")
+    deduction = (base * percent / Decimal("100")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    if deduction <= 0:
+        return Decimal("0")
+    Salary.objects.filter(pk=salary.pk).update(deductions=F("deductions") + deduction)
+    return deduction
+
+
+def _make_aware(dt_value):
+    if dt_value is None:
+        return None
+    if dj_timezone.is_naive(dt_value):
+        tz = dj_timezone.get_current_timezone()
+        return dj_timezone.make_aware(dt_value, tz)
+    return dt_value
+
+
+def _local_dt(dt_value):
+    aware = _make_aware(dt_value)
+    if aware is None:
+        return None
+    return dj_timezone.localtime(aware)
+
+
+def _local_iso(dt_value):
+    local = _local_dt(dt_value)
+    return local.isoformat() if local else None
 
 
 def _send_geofence_alert(
@@ -82,6 +144,8 @@ def _send_geofence_alert(
     distance: Optional[float],
     radius: Optional[float],
     outside_minutes: Optional[float],
+    deduction_percent: Optional[Decimal],
+    deduction_value: Optional[Decimal],
 ) -> None:
     location_name = getattr(location, "name", "الموقع المحدد") if location else "الموقع المحدد"
     client_name = getattr(location, "client_name", "") if location else ""
@@ -90,6 +154,15 @@ def _send_geofence_alert(
     duration_txt = ""
     if outside_minutes is not None:
         duration_txt = f" مدة الابتعاد التقريبية {int(round(outside_minutes))} دقيقة."
+    deduction_txt = ""
+    if deduction_value is not None and deduction_value > 0:
+        percent_part = ""
+        if deduction_percent is not None and deduction_percent > 0:
+            percent_part = f" بنسبة {_format_decimal(deduction_percent)}%"
+        deduction_txt = (
+            f" تم تطبيق خصم{percent_part}"
+            f" بقيمة {_format_decimal(deduction_value)}."
+        )
 
     message = (
         f"تنبيه مخالفة موقع للحارس {employee.full_name}."
@@ -101,6 +174,7 @@ def _send_geofence_alert(
     message = (
         f"{message}. المسافة الحالية عن مركز الموقع {distance_txt} مقابل نطاق مسموح {radius_txt}."
         f"{duration_txt} يجب عدم تجاوز {GEOFENCE_WARNING_MINUTES} دقيقة خارج النطاق."
+        f"{deduction_txt}"
     )
 
     emails = []
@@ -155,6 +229,30 @@ def record_geofence_violation(
     if outside_minutes is not None:
         duration_text = f"{int(round(outside_minutes))} دقيقة تقريباً"
 
+    rule, _ = ViolationRule.objects.get_or_create(
+        title=GEOFENCE_RULE_TITLE,
+        defaults={
+            "description": GEOFENCE_RULE_DESCRIPTION,
+            "default_action": "deduct" if GEOFENCE_DEDUCTION_PERCENT > 0 else "warn",
+            "default_deduction_percent": GEOFENCE_DEDUCTION_PERCENT,
+        },
+    )
+    rule_percent = _decimal_or_zero(getattr(rule, "default_deduction_percent", None))
+    deduction_percent = rule_percent if rule_percent > 0 else GEOFENCE_DEDUCTION_PERCENT
+    deduction_value = _apply_geofence_salary_deduction(employee, deduction_percent)
+    if deduction_value <= 0:
+        deduction_percent = Decimal("0")
+    else:
+        updates = {}
+        if rule.default_action != "deduct":
+            updates["default_action"] = "deduct"
+        if rule_percent <= 0 and deduction_percent > 0:
+            updates["default_deduction_percent"] = deduction_percent
+        if updates:
+            for field, value in updates.items():
+                setattr(rule, field, value)
+            rule.save(update_fields=list(updates.keys()))
+
     if attendance_record:
         note_parts = []
         if attendance_record.notes:
@@ -162,18 +260,16 @@ def record_geofence_violation(
         note = f"[GEOFENCE] {summary} (المسافة {dist_text} / النطاق {radius_text})"
         if duration_text:
             note = f"{note} - مدة الابتعاد {duration_text}"
+        if deduction_value > 0:
+            note = (
+                f"{note} - خصم {_format_decimal(deduction_percent)}%"
+                f" بقيمة {_format_decimal(deduction_value)}"
+            )
         note_parts.append(note)
         attendance_record.notes = "\n".join(part for part in note_parts if part)
         attendance_record.is_violation = True
         attendance_record.save(update_fields=["notes", "is_violation"])
 
-    rule, _ = ViolationRule.objects.get_or_create(
-        title=GEOFENCE_RULE_TITLE,
-        defaults={
-            "description": GEOFENCE_RULE_DESCRIPTION,
-            "default_action": "warn",
-        },
-    )
     warning_level = (
         EmployeeViolation.objects.filter(employee=employee, rule=rule).count() + 1
     )
@@ -183,6 +279,11 @@ def record_geofence_violation(
         description = f"{description} استمر الابتعاد لمدة {duration_text}."
     if codes:
         description = f"{description} الرموز: {', '.join(codes)}."
+    if deduction_value > 0:
+        description = (
+            f"{description} تم تطبيق خصم بنسبة {_format_decimal(deduction_percent)}%"
+            f" بقيمة {_format_decimal(deduction_value)}."
+        )
 
     violation = EmployeeViolation.objects.create(
         employee=employee,
@@ -191,6 +292,7 @@ def record_geofence_violation(
         location=location,
         description=description,
         warning_level=warning_level,
+        deduction_value=deduction_value,
     )
 
     _send_geofence_alert(
@@ -200,6 +302,8 @@ def record_geofence_violation(
         distance=distance,
         radius=radius,
         outside_minutes=outside_minutes,
+        deduction_percent=deduction_percent if deduction_percent > 0 else None,
+        deduction_value=deduction_value if deduction_value > 0 else None,
     )
     return violation
 
@@ -936,7 +1040,7 @@ class LocationPingAPIView(APIView):
         lat = ser.validated_data["lat"]
         lng = ser.validated_data["lng"]
         accuracy = ser.validated_data.get("accuracy")
-        recorded_at = ser.validated_data.get("recorded_at") or dj_timezone.now()
+        recorded_at = _make_aware(ser.validated_data.get("recorded_at") or dj_timezone.now())
 
         found = ser.find_best_location(employee, lat, lng)
         if not found:
@@ -986,7 +1090,7 @@ class LocationPingAPIView(APIView):
                 .order_by('-recorded_at')
                 .first()
             )
-            outside_start = last_inside.recorded_at if last_inside else None
+            outside_start = _make_aware(last_inside.recorded_at) if last_inside else None
             if outside_start is None:
                 last_ping = (
                     LocationPing.objects
@@ -995,7 +1099,7 @@ class LocationPingAPIView(APIView):
                     .first()
                 )
                 if last_ping and not last_ping.within_radius:
-                    outside_start = last_ping.recorded_at
+                    outside_start = _make_aware(last_ping.recorded_at)
             if outside_start is None:
                 outside_start = recorded_at
             outside_minutes = max(0.0, (recorded_at - outside_start).total_seconds() / 60.0)
@@ -1039,7 +1143,7 @@ class LocationPingAPIView(APIView):
             "violation_codes": violation_codes,
             "violation_triggered": violation_triggered,
             "outside_minutes": outside_minutes,
-            "recorded_at": recorded_at.isoformat(),
+            "recorded_at": _local_iso(recorded_at),
         }
         return Response(data, status=status.HTTP_200_OK)
 
@@ -1079,9 +1183,11 @@ def location_dashboard_feed(request):
     locations_map = {loc.id: loc for loc in Location.objects.filter(id__in=location_ids)}
 
     now = dj_timezone.now()
+    now_local = _local_dt(now) or now
     results = []
     for emp in employees:
-        last_recorded = getattr(emp, "last_ping_at", None)
+        last_recorded_raw = getattr(emp, "last_ping_at", None)
+        last_recorded = _local_dt(last_recorded_raw)
         last_lat = getattr(emp, "last_lat", None)
         last_lng = getattr(emp, "last_lng", None)
         if last_recorded is None and last_lat is None and last_lng is None:
@@ -1089,7 +1195,7 @@ def location_dashboard_feed(request):
 
         minutes_since = None
         if last_recorded:
-            minutes_since = round((now - last_recorded).total_seconds() / 60.0, 1)
+            minutes_since = round((now_local - last_recorded).total_seconds() / 60.0, 1)
 
         loc = locations_map.get(getattr(emp, "last_location_id", None))
         loc_center = None
@@ -1133,7 +1239,7 @@ def location_dashboard_feed(request):
 
     return JsonResponse({
         "warning_minutes": GEOFENCE_WARNING_MINUTES,
-        "now": now.isoformat(),
+        "now": now_local.isoformat() if now_local else now.isoformat(),
         "results": results,
     })
 
@@ -1289,6 +1395,119 @@ class AttendanceLastForMeView(APIView):
     """
     permission_classes = [IsAuthenticated]
 
+    @staticmethod
+    def _determine_action(record: AttendanceRecord) -> str:
+        """
+        يحاول تحديد آخر إجراء اعتمادًا على الحقول المتاحة لضمان توافق البيانات مع الواجهة.
+        """
+        if record.check_type:
+            return record.check_type
+        if record.early_checkout:
+            return "early_check_out"
+        if record.check_out_time:
+            return "check_out"
+        return "check_in"
+
+    @staticmethod
+    def _shift_window(record: AttendanceRecord) -> tuple[Optional[dt.datetime], Optional[dt.datetime]]:
+        """
+        يحسب نافذة الوردية (إن وُجدت) باستخدام تاريخ وقت الحضور لضمان تمثيل صحيح بالتوقيت المحلي.
+        """
+        shift = getattr(record, "shift", None)
+        reference_dt = (
+            record.check_in_time
+            or record.timestamp
+            or record.created_at
+        )
+        if not shift or reference_dt is None:
+            return None, None
+
+        tz = dj_timezone.get_current_timezone()
+        if dj_timezone.is_naive(reference_dt):
+            reference_dt = dj_timezone.make_aware(reference_dt, tz)
+        local_ref = dj_timezone.localtime(reference_dt, timezone=tz)
+
+        start_naive = dt.datetime.combine(local_ref.date(), shift.start_time)
+        end_naive = dt.datetime.combine(local_ref.date(), shift.end_time)
+
+        start = dj_timezone.make_aware(start_naive, tz) if dj_timezone.is_naive(start_naive) else start_naive
+        end = dj_timezone.make_aware(end_naive, tz) if dj_timezone.is_naive(end_naive) else end_naive
+
+        if end <= start:
+            end = end + timedelta(days=1)
+
+        return start, end
+
+    def _serialize_record(self, record: AttendanceRecord) -> dict[str, object]:
+        """
+        يثري بيانات السجل الأخير لتتضمن مفاتيح مفهومة لتطبيق الهاتف.
+        """
+        base = AttendanceMiniSerializer(record).data
+        location_obj = getattr(record, "location", None)
+        employee_obj = getattr(record, "employee", None)
+
+        action = self._determine_action(record)
+        recorded_at = (
+            record.timestamp
+            or record.updated_at
+            or record.check_out_time
+            or record.check_in_time
+        )
+
+        shift_start, shift_end = self._shift_window(record)
+
+        action_labels = {
+            "check_in": "الحضور",
+            "check_out": "الانصراف",
+            "early_check_out": "الانصراف المبكر",
+        }
+        action_label = action_labels.get(action, action)
+        detail_msg = f"آخر تسجيل: {action_label}."
+
+        recorded_at_iso = _local_iso(recorded_at)
+        timestamp_iso = _local_iso(record.timestamp) if record.timestamp else None
+        shift_start_iso = _local_iso(shift_start) if shift_start else None
+        shift_end_iso = _local_iso(shift_end) if shift_end else None
+
+        payload: dict[str, object] = {
+            "ok": True,
+            "detail": detail_msg,
+            "message": detail_msg,
+            "record_id": str(record.id),
+            "action": action,
+            "attendance_action": action,
+            "type": action,
+            "recorded_at": recorded_at_iso,
+            "timestamp": timestamp_iso,
+            "note": record.notes,
+            "notes": record.notes,
+            "biometric_verified": record.biometric_verified,
+            "biometric_method": record.biometric_method,
+            "biometric_attempts": record.biometric_attempts,
+            "unrestricted": shift_start is None and shift_end is None,
+            "shift_window_start": shift_start_iso,
+            "shift_window_end": shift_end_iso,
+        }
+
+        # معلومات إضافية عن الموظف والموقع إن توفرت
+        if employee_obj:
+            payload["employee"] = getattr(employee_obj, "full_name", None)
+            payload.setdefault("employee_id", str(employee_obj.id))
+
+        if location_obj:
+            payload["location"] = getattr(location_obj, "name", None)
+            payload["location_name"] = getattr(location_obj, "name", None)
+            client_name = getattr(location_obj, "client_name", None)
+            if client_name:
+                payload["client_name"] = client_name
+            location_id = getattr(location_obj, "id", None)
+            if location_id is not None:
+                payload["location_id"] = str(location_id)
+
+        combined = dict(base)
+        combined.update(payload)
+        return combined
+
     def get(self, request):
         # جلب الموظف المرتبط بالمستخدم الحالي
         try:
@@ -1305,7 +1524,7 @@ class AttendanceLastForMeView(APIView):
         if not rec:
             return Response(status=status.HTTP_204_NO_CONTENT)
 
-        data = AttendanceMiniSerializer(rec).data
+        data = self._serialize_record(rec)
         return Response(data, status=status.HTTP_200_OK)
 
 
