@@ -233,6 +233,8 @@ class ShiftAssignmentMiniSerializer(serializers.ModelSerializer):
     checkin_grace        = serializers.IntegerField(read_only=True)
     checkout_grace       = serializers.IntegerField(read_only=True)
     checkout_grace_hours = serializers.DecimalField(max_digits=4, decimal_places=2, read_only=True)
+    pre_shift_buffer_minutes  = serializers.IntegerField(read_only=True)
+    post_shift_buffer_minutes = serializers.IntegerField(read_only=True)
     unrestricted         = serializers.SerializerMethodField()
 
     class Meta:
@@ -241,6 +243,7 @@ class ShiftAssignmentMiniSerializer(serializers.ModelSerializer):
             "id", "date", "shift_name", "location_name", "location_id",
             "start_time", "end_time",
             "checkin_grace", "checkout_grace", "checkout_grace_hours",
+            "pre_shift_buffer_minutes", "post_shift_buffer_minutes",
             "unrestricted", "active", "notes",
         ]
 
@@ -371,6 +374,8 @@ class EmployeeMeSerializer(serializers.ModelSerializer):
                 "end_time":   end.strftime("%H:%M")   if end   else None,
                 "active": bool(getattr(a, "is_active", getattr(a, "active", True))),
                 "notes": a.notes or "",
+                "pre_shift_buffer_minutes": getattr(a, "pre_shift_buffer_minutes", 0),
+                "post_shift_buffer_minutes": getattr(a, "post_shift_buffer_minutes", 0),
             })
         return out
 
@@ -601,12 +606,20 @@ class AttendanceCheckSerializer(serializers.Serializer):
 
             anchor = getattr(a, "date", None) or None
             start_dt, end_dt = self._anchor_times(now_local, start_t, end_t, anchor_date=anchor)
+            pre_buf_min = int(getattr(a, "pre_shift_buffer_minutes", 0) or 0)
+            post_buf_min = int(getattr(a, "post_shift_buffer_minutes", 0) or 0)
+            pre_buffer = timedelta(minutes=pre_buf_min)
+            post_buffer = timedelta(minutes=post_buf_min)
+            window_start = start_dt - pre_buffer
+            window_end = end_dt + post_buffer
 
-            # يجب أن يغطي الوقت الحالي
+            # يجب أن يغطي الوقت الحالي ضمن النافذة الممتدة
             try:
-                if not (start_dt <= now_local <= end_dt):
+                if not (window_start <= now_local <= window_end):
                     continue
             except Exception:
+                continue
+            if action == "check_in" and now_local > end_dt:
                 continue
 
             ok = False
@@ -620,13 +633,14 @@ class AttendanceCheckSerializer(serializers.Serializer):
 
             if unrestricted:
                 ok = True
-                win_l = None
-                win_r = None
+                win_l = window_start
+                win_r = end_dt
             else:
                 if action == "check_in":
                     grace_min = int(a.checkin_grace or 0)
-                    win_l = start_dt
-                    win_r = start_dt + timedelta(minutes=grace_min)
+                    win_l = window_start
+                    grace_end = start_dt + timedelta(minutes=grace_min) if grace_min > 0 else start_dt
+                    win_r = min(window_end, grace_end)
                     ok = (win_l <= now_local <= win_r)
                 elif action in ("check_out", "early_check_out"):
                     # الانصراف العادي: بعد السماح | الانصراف المبكر: سيتحقق لاحقاً من الحضور أولاً
@@ -636,14 +650,20 @@ class AttendanceCheckSerializer(serializers.Serializer):
                         threshold_min = int(a.checkout_grace)
                     else:
                         threshold_min = 0
-                    earliest = start_dt + timedelta(minutes=threshold_min)
-                    win_l, win_r = earliest, None
-                    ok = (now_local >= earliest) if action == "check_out" else True
+                    earliest_by_threshold = start_dt + timedelta(minutes=threshold_min)
+                    earliest = max(end_dt, earliest_by_threshold)
+                    win_l = earliest
+                    win_r = window_end
+                    if action == "check_out":
+                        ok = (win_l <= now_local <= window_end)
+                    else:
+                        ok = (window_start <= now_local <= window_end)
 
             if not ok:
                 if action == "check_in":
                     reason = (f"⚠️ لا يمكن تسجيل الحضور الآن. "
-                              f"فترة السماح انتهت عند {(start_dt + timedelta(minutes=int(a.checkin_grace or 0))).strftime('%H:%M')}.")
+                              f"الفترة المسموحة كانت من {win_l.strftime('%H:%M')} إلى {win_r.strftime('%H:%M')}."
+                              if win_l and win_r else "⚠️ لا يمكن تسجيل الحضور في هذا الوقت.")
                 else:
                     if a.checkout_grace_hours is not None:
                         reason = f"⚠️ لا يمكن تسجيل الانصراف قبل مرور {a.checkout_grace_hours} ساعة من بداية الوردية."

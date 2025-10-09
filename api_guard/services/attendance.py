@@ -16,6 +16,7 @@ from ..models import (
     Employee,
     EmployeeShiftAssignment,
     EmployeeViolation,
+    ShiftAbsenceLog,
     Salary,
     ViolationRule,
 )
@@ -27,9 +28,14 @@ MISSING_CHECKOUT_RULE_TITLE = "عدم تسجيل الانصراف"
 MISSING_CHECKOUT_RULE_DESCRIPTION = (
     "مخالفة تلقائية عند عدم تسجيل الانصراف قبل إغلاق الوردية."
 )
+MISSING_CHECKIN_RULE_TITLE = "عدم تسجيل الحضور"
+MISSING_CHECKIN_RULE_DESCRIPTION = (
+    "مخالفة تلقائية عند عدم تسجيل الحضور للوردية المجدولة."
+)
 DEFAULT_AUTO_CLOSE_GRACE_MINUTES = 15
 DEFAULT_WARNING_WINDOW_HOURS = 6
 ONE_DAY = timedelta(days=1)
+ABSENCE_LOOKBACK_DAYS = 2
 
 
 def close_stale_attendance_records(
@@ -77,6 +83,141 @@ def close_stale_attendance_for_employee(
     if employee is None:
         return []
     return close_stale_attendance_records(as_of=as_of, employees=[employee], notify=notify)
+
+
+def flag_absent_employees(
+    *,
+    as_of: Optional[datetime] = None,
+    employees: Optional[Iterable[Employee]] = None,
+    notify: bool = True,
+) -> list[dict]:
+    """
+    يرصد الورديات التي انتهت بدون تسجيل حضور، ثم يضيف مخالفة غياب ويقوم بالإشعار.
+    """
+    as_of = as_of or timezone.now()
+    local_now = timezone.localtime(as_of)
+    actions: list[dict] = []
+
+    assignments = (EmployeeShiftAssignment.objects
+                   .select_related(
+                        "employee",
+                        "employee__user",
+                        "employee__supervisor",
+                        "shift",
+                        "location",
+                   )
+                   .filter(active=True))
+    if employees is not None:
+        employee_ids = [emp.id for emp in employees if getattr(emp, "id", None)]
+        if not employee_ids:
+            return actions
+        assignments = assignments.filter(employee_id__in=employee_ids)
+
+    lookback_threshold = as_of - timedelta(days=ABSENCE_LOOKBACK_DAYS)
+
+    for assignment in assignments:
+        shift = assignment.shift
+        employee = assignment.employee
+        if shift is None or employee is None:
+            continue
+
+        start_time = assignment.start_time or shift.start_time
+        end_time = assignment.end_time or shift.end_time
+        if not (start_time and end_time):
+            continue
+
+        candidate_dates = []
+        if assignment.date:
+            candidate_dates = [assignment.date]
+        else:
+            candidate_dates = [local_now.date(), local_now.date() - ONE_DAY]
+
+        for anchor_date in candidate_dates:
+            if anchor_date is None:
+                continue
+            if assignment.date and anchor_date != assignment.date:
+                continue
+
+            window_bounds = _assignment_window_bounds(assignment, anchor_date)
+            if window_bounds is None:
+                continue
+            window_start, window_end, nominal_start, nominal_end = window_bounds
+
+            if window_end is None or window_start is None:
+                continue
+            if window_end > as_of:
+                continue
+            if window_end < lookback_threshold:
+                continue
+
+            attendance_date = nominal_start.date()
+            if ShiftAbsenceLog.objects.filter(
+                employee=employee,
+                shift=shift,
+                date=attendance_date,
+                deleted_at__isnull=True,
+            ).exists():
+                continue
+
+            has_attendance = AttendanceRecord.objects.filter(
+                employee=employee,
+                check_in_time__gte=window_start,
+                check_in_time__lte=window_end,
+                deleted_at__isnull=True,
+            ).exists()
+            if has_attendance:
+                continue
+
+            with transaction.atomic():
+                deduction = _apply_salary_deduction(employee)
+                violation = _create_absence_violation(
+                    assignment=assignment,
+                    absence_date=attendance_date,
+                    deduction=deduction,
+                )
+                log = ShiftAbsenceLog.objects.create(
+                    employee=employee,
+                    shift=shift,
+                    assignment=assignment,
+                    location=assignment.location,
+                    date=attendance_date,
+                    violation=violation,
+                )
+
+            notification_status = None
+            if notify:
+                notification_status = _notify_absence(
+                    employee=employee,
+                    absence_date=attendance_date,
+                    deduction=deduction,
+                    shift=shift,
+                    location=assignment.location,
+                )
+                if notification_status is not None:
+                    ShiftAbsenceLog.objects.filter(pk=log.pk).update(notified=bool(notification_status))
+
+            actions.append({
+                "employee_id": employee.id,
+                "shift_id": shift.id,
+                "assignment_id": assignment.id,
+                "absence_date": attendance_date,
+                "deduction": deduction,
+                "violation_id": violation.id if violation else None,
+                "notified": notification_status,
+            })
+
+    return actions
+
+
+def flag_absent_assignments_for_employee(
+    employee: Employee,
+    *,
+    as_of: Optional[datetime] = None,
+    notify: bool = True,
+) -> list[dict]:
+    if employee is None:
+        return []
+    return flag_absent_employees(as_of=as_of, employees=[employee], notify=notify)
 
 
 def _handle_single_record(record: AttendanceRecord, *, as_of: datetime, notify: bool) -> Optional[dict]:
@@ -174,6 +315,36 @@ def _find_relevant_assignment(record: AttendanceRecord, local_check_in: datetime
     return qs.first()
 
 
+def _assignment_window_bounds(
+    assignment: EmployeeShiftAssignment,
+    anchor_date,
+) -> Optional[tuple[datetime, datetime, datetime, datetime]]:
+    shift = assignment.shift
+    if shift is None or anchor_date is None:
+        return None
+
+    start_time = assignment.start_time or shift.start_time
+    end_time = assignment.end_time or shift.end_time
+    if not (start_time and end_time):
+        return None
+
+    start_naive = datetime.combine(anchor_date, start_time)
+    end_naive = datetime.combine(anchor_date, end_time)
+    if end_time <= start_time:
+        end_naive += ONE_DAY
+
+    start_dt = _make_aware(start_naive)
+    end_dt = _make_aware(end_naive)
+
+    pre_minutes = int(getattr(assignment, "pre_shift_buffer_minutes", 0) or 0)
+    post_minutes = int(getattr(assignment, "post_shift_buffer_minutes", 0) or 0)
+
+    window_start = start_dt - timedelta(minutes=pre_minutes)
+    window_end = end_dt + timedelta(minutes=post_minutes)
+
+    return window_start, window_end, start_dt, end_dt
+
+
 def _apply_salary_deduction(employee: Employee) -> Decimal:
     salary, _ = Salary.objects.get_or_create(employee=employee)
     base = salary.base_salary or Decimal("0")
@@ -222,6 +393,46 @@ def _create_violation(
     return violation
 
 
+def _create_absence_violation(
+    *,
+    assignment: EmployeeShiftAssignment,
+    absence_date,
+    deduction: Decimal,
+) -> Optional[EmployeeViolation]:
+    employee = assignment.employee
+    shift = assignment.shift
+    try:
+        rule = ViolationRule.objects.get(title=MISSING_CHECKIN_RULE_TITLE)
+    except ViolationRule.DoesNotExist:
+        rule = ViolationRule.objects.create(
+            title=MISSING_CHECKIN_RULE_TITLE,
+            description=MISSING_CHECKIN_RULE_DESCRIPTION,
+            default_action="deduct",
+            default_deduction_percent=Decimal("0"),
+        )
+
+    warning_level = (
+        EmployeeViolation.objects.filter(employee=employee, rule=rule).count() + 1
+    )
+
+    shift_name = getattr(shift, "name", "")
+    description = (
+        f"تسجيل غياب ليوم {absence_date.isoformat()} بسبب عدم تسجيل الحضور"
+        f"{f' للوردية {shift_name}' if shift_name else ''}."
+    )
+
+    violation = EmployeeViolation.objects.create(
+        employee=employee,
+        rule=rule,
+        reported_by=employee.supervisor,
+        location=assignment.location,
+        description=description,
+        warning_level=warning_level,
+        deduction_value=deduction,
+    )
+    return violation
+
+
 def _soft_delete_record(record: AttendanceRecord) -> None:
     notes_suffix = "[AUTO-CLOSED: missing checkout]"
     if record.notes:
@@ -237,11 +448,45 @@ def _notify_employee(employee: Employee, absence_date, deduction: Decimal) -> Op
         f"عزيزي {employee.full_name}، لم يتم تسجيل انصرافك ليوم {absence_date}. "
         f"تم تسجيل غياب وخصم بقيمة {deduction} من راتبك."
     )
+    return _dispatch_notification(
+        employee=employee,
+        subject="تنبيه عدم تسجيل انصراف",
+        message=message,
+    )
 
+
+def _notify_absence(
+    *,
+    employee: Employee,
+    absence_date,
+    deduction: Decimal,
+    shift,
+    location,
+) -> Optional[bool]:
+    shift_part = f" للوردية {getattr(shift, 'name', '')}" if getattr(shift, "name", "") else ""
+    location_part = f" في موقع {getattr(location, 'name', '')}" if getattr(location, "name", "") else ""
+    deduction_part = f" وتم تطبيق خصم بقيمة {deduction}." if deduction and deduction > 0 else "."
+    message = (
+        f"عزيزي {employee.full_name}، لم يتم تسجيل حضورك{shift_part}{location_part} ليوم {absence_date}. "
+        f"تم تسجيل مخالفة غياب{deduction_part}"
+    )
+    return _dispatch_notification(
+        employee=employee,
+        subject="تنبيه غياب بدون تسجيل حضور",
+        message=message,
+    )
+
+
+def _dispatch_notification(
+    *,
+    employee: Employee,
+    subject: str,
+    message: str,
+) -> Optional[bool]:
     phone = getattr(employee, "phone_number", None)
     email = getattr(getattr(employee, "user", None), "email", None)
 
-    results = []
+    results: list[bool] = []
 
     if phone:
         try:
@@ -254,7 +499,7 @@ def _notify_employee(employee: Employee, absence_date, deduction: Decimal) -> Op
     if email:
         try:
             send_mail(
-                subject="تنبيه عدم تسجيل انصراف",
+                subject=subject,
                 message=message,
                 from_email=getattr(settings, "DEFAULT_FROM_EMAIL", None),
                 recipient_list=[email],

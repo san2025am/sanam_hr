@@ -279,6 +279,16 @@ class EmployeeShiftAssignment(BaseModel):
         null=True, blank=True,
         related_name='shift_assignments', verbose_name="الموقع"
     )
+    pre_shift_buffer_minutes = models.PositiveIntegerField(
+        default=0,
+        verbose_name="مدة السماح قبل الوردية (دقائق)",
+        help_text="يسمح للحارس بالتجهيز وتسجيل الحضور قبل بدء الوردية الرسمية."
+    )
+    post_shift_buffer_minutes = models.PositiveIntegerField(
+        default=0,
+        verbose_name="مدة السماح بعد الوردية (دقائق)",
+        help_text="يبقي التتبع فعالًا بعد الوردية الرسمية قبل تسجيل المخالفات."
+    )
 
     # === سماحات مخصّصة (اختيارية) ===
     checkin_grace  = models.PositiveIntegerField(
@@ -342,6 +352,52 @@ class AttendanceRecord(BaseModel):
         verbose_name = "7. سجل حضور"
         verbose_name_plural = "7. سجلات الحضور"
         ordering = ['-check_in_time']
+
+
+class ShiftAbsenceLog(BaseModel):
+    employee = models.ForeignKey(
+        Employee,
+        on_delete=models.CASCADE,
+        related_name="shift_absence_logs",
+        verbose_name="الموظف",
+    )
+    shift = models.ForeignKey(
+        Shift,
+        on_delete=models.CASCADE,
+        related_name="absence_logs",
+        verbose_name="الوردية",
+    )
+    assignment = models.ForeignKey(
+        EmployeeShiftAssignment,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="absence_logs",
+        verbose_name="تعيين الوردية",
+    )
+    location = models.ForeignKey(
+        Location,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="absence_logs",
+        verbose_name="الموقع",
+    )
+    date = models.DateField(verbose_name="تاريخ الوردية")
+    violation = models.ForeignKey(
+        'EmployeeViolation',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="absence_logs",
+        verbose_name="المخالفة المرتبطة",
+    )
+    notified = models.BooleanField(default=False, verbose_name="تم إرسال الإشعار؟")
+
+    class Meta:
+        verbose_name = "7.2 سجل غياب وردية"
+        verbose_name_plural = "7.2 سجلات غياب الورديات"
+        unique_together = ("employee", "shift", "date")
 
 
 class LocationPing(BaseModel):
