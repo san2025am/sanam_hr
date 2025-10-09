@@ -794,16 +794,16 @@ class ResolveLocationSerializer(serializers.Serializer):
         attrs["employee"] = employee
         return attrs
 
-
-class LocationPingSerializer(ResolveLocationSerializer):
-    recorded_at = serializers.DateTimeField(required=False)
-
     def find_best_location(self, employee: Employee, lat: float, lng: float):
+        """
+        Locate the best matching site for the employee based on coordinates.
+        Shared between resolve-location and location ping endpoints.
+        """
         qs = Location.objects.filter(assigned_employees=employee)
         best = None  # (loc, distance_m, mode, within_radius)
 
         for loc in qs:
-            # polygon أولاً
+            # polygon check first
             if getattr(loc, "use_polygon", False) and loc.polygon_coords:
                 try:
                     poly = loc.polygon_coords
@@ -824,7 +824,7 @@ class LocationPingSerializer(ResolveLocationSerializer):
                 except Exception:
                     pass
 
-            # دائرة نصف قطر
+            # fallback to circular radius
             if loc.gps_coordinates:
                 try:
                     la, ln = [float(x.strip()) for x in loc.gps_coordinates.split(",", 1)]
@@ -844,6 +844,10 @@ class LocationPingSerializer(ResolveLocationSerializer):
                         best = (loc, dist, "radius", False)
 
         return best
+
+
+class LocationPingSerializer(ResolveLocationSerializer):
+    recorded_at = serializers.DateTimeField(required=False)
 
 
 class ReportAttachmentSerializer(serializers.ModelSerializer):
