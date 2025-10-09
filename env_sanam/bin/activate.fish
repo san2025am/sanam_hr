@@ -33,7 +33,7 @@ end
 # Unset irrelevant variables.
 deactivate nondestructive
 
-set -gx VIRTUAL_ENV /root/sanam_hr/env_sanam
+set -gx VIRTUAL_ENV /home/mugahed/Desktop/sanam2/django_project_sorted/django_project/env_sanam
 
 set -gx _OLD_VIRTUAL_PATH $PATH
 set -gx PATH "$VIRTUAL_ENV/"bin $PATH
