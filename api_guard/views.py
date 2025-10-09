@@ -315,6 +315,9 @@ def _send_geofence_alert(
     supervisor_email = getattr(getattr(supervisor, "user", None), "email", None)
     if supervisor_email:
         emails.append(supervisor_email)
+    hr_emails = getattr(settings, "GEOFENCE_ALERT_RECIPIENTS", None)
+    if hr_emails:
+        emails.extend([addr for addr in hr_emails if addr])
     unique_emails = list({addr for addr in emails if addr})
     from_email = getattr(settings, "DEFAULT_FROM_EMAIL", None)
     if unique_emails and from_email:
