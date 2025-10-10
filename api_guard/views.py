@@ -7,6 +7,8 @@ import logging
 from datetime import timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
+from api_guard.utils.maps import get_current_shift_window, is_location_allowed_for_user
+
 from typing import Optional, Sequence
 
 from django.conf import settings
@@ -963,8 +965,33 @@ class AttendanceCheckAPIView(APIView):
 
         if not ser.validated_data.get('biometric_verified', False):
             return Response({'detail': 'التحقق البيومتري فشل، لا يمكن تسجيل الحضور.'}, status=status.HTTP_403_FORBIDDEN)
+       
+        action = (request.data.get('action') or '').strip().lower()
+        if action in ('check_in', 'check-in'): action = 'checkin'
+        elif action in ('check_out', 'check-out'): action = 'checkout'
+        if action not in ('checkin', 'checkout'):
+            return fail('Invalid action', code='bad_action', status=400)
 
-        # استخراج القيم
+        start, end, unrestricted, pre_buf, post_buf = get_current_shift_window(request.user)
+        now = timezone.now().astimezone(timezone.utc)
+        if not unrestricted and start and end:
+            start_buf = start - timedelta(minutes=pre_buf or 0)
+            end_buf = end + timedelta(minutes=post_buf or 0)
+            if not (start_buf <= now <= end_buf):
+                return fail('خارج وقت الوردية', code='outside_shift', status=400)
+
+        try:
+            lat = float(request.data.get('lat'))
+            lng = float(request.data.get('lng'))
+            acc = float(request.data.get('accuracy') or 0.0)
+        except Exception:
+            return fail('إحداثيات غير صحيحة', code='invalid_coordinates', status=400)
+
+        allowed, reason, loc_id = is_location_allowed_for_user(request.user, lat, lng)
+        if not allowed:
+            return fail(reason or 'الموقع غير مسموح', code='location_denied', status=400)
+
+                # استخراج القيم
         action   = ser.validated_data.get("action")
         employee = ser.validated_data.get("employee")
         location = ser.validated_data.get("location_obj")
@@ -1470,7 +1497,13 @@ class LocationPingAPIView(APIView):
             "shift_window_start": _local_iso(window_start),
             "shift_window_end": _local_iso(window_end),
         })
-
+        start, end, unrestricted, pre_buf, post_buf = get_current_shift_window(request.user)
+        now = timezone.now().astimezone(timezone.utc)
+        if not unrestricted and start and end:
+            start_buf = start - timedelta(minutes=pre_buf or 0)
+            end_buf = end + timedelta(minutes=post_buf or 0)
+            if not (start_buf <= now <= end_buf):
+                return fail('خارج وقت الوردية', code='outside_shift', status=400)
         ping = LocationPing.objects.create(
             employee=employee,
             location=loc,
