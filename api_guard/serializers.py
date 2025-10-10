@@ -62,7 +62,7 @@ from .models import (
     AttendanceRecord, Salary, Report, ReportAttachment, Request, Advance,
     ViolationRule, EmployeeViolation, Contract, Custody,
     UniformItem, UniformDelivery, UniformDeliveryItem, PasswordResetSMS,
-    EmployeeShiftAssignment,
+    EmployeeShiftAssignment, GeofenceViolationPause,
     UniformItem, UniformDelivery, UniformDeliveryItem,
 )
 
@@ -868,6 +868,57 @@ class ResolveLocationSerializer(serializers.Serializer):
 
 class LocationPingSerializer(ResolveLocationSerializer):
     recorded_at = serializers.DateTimeField(required=False)
+
+
+class GeofenceViolationPauseRequestSerializer(serializers.Serializer):
+    ACTION_CHOICES = (
+        ("pause", "pause"),
+        ("resume", "resume"),
+    )
+
+    action = serializers.ChoiceField(choices=ACTION_CHOICES)
+    duration_minutes = serializers.IntegerField(
+        required=False,
+        min_value=1,
+        max_value=24 * 60,
+        help_text="مدة الإيقاف بالدقائق (بين 1 و 1440 دقيقة).",
+    )
+    reason = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=500)
+    location_id = serializers.UUIDField(required=False, allow_null=True)
+
+    def validate(self, attrs):
+        request = self.context["request"]
+        try:
+            employee = Employee.objects.select_related("user").get(user=request.user)
+        except Employee.DoesNotExist:
+            raise serializers.ValidationError({"detail": "لا يوجد ملف موظف مرتبط بالحساب."})
+
+        location_obj = None
+        location_id = attrs.get("location_id")
+        if location_id:
+            try:
+                location_obj = Location.objects.get(id=location_id)
+            except Location.DoesNotExist:
+                raise serializers.ValidationError({"location_id": "الموقع غير موجود."})
+
+        action = attrs.get("action")
+        duration = attrs.get("duration_minutes")
+        if action == "pause":
+            if duration is None:
+                raise serializers.ValidationError({"duration_minutes": "حدد مدة الإيقاف بالدقائق."})
+            if duration <= 0:
+                raise serializers.ValidationError({"duration_minutes": "المدة يجب أن تكون أكبر من صفر."})
+        else:
+            attrs["duration_minutes"] = None
+
+        reason = attrs.get("reason")
+        if reason is not None:
+            reason = reason.strip()
+            attrs["reason"] = reason
+
+        attrs["employee"] = employee
+        attrs["location_obj"] = location_obj
+        return attrs
 
 
 class ReportAttachmentSerializer(serializers.ModelSerializer):

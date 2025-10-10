@@ -1,6 +1,7 @@
 # api_guard/models.py
 
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
+from typing import Optional
 from decimal import Decimal, ROUND_HALF_UP
 
 from django.db import models, transaction
@@ -194,6 +195,127 @@ class LocationMonitoringConfig(BaseModel):
         verbose_name = "4.1 ضبط مراقبة موقع"
         verbose_name_plural = "4.1 ضبط مراقبة المواقع"
         ordering = ["location__name"]
+
+
+class GeofenceViolationPause(BaseModel):
+    """
+    يمكّن من إيقاف تسجيل مخالفة الخروج عن النطاق لمدة مؤقتة مع سبب.
+    """
+
+    employee = models.ForeignKey(
+        Employee,
+        on_delete=models.CASCADE,
+        related_name="geofence_violation_pauses",
+        verbose_name="الموظف",
+    )
+    location = models.ForeignKey(
+        Location,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="geofence_violation_pauses",
+        verbose_name="الموقع",
+    )
+    pause_started_at = models.DateTimeField(default=timezone.now, verbose_name="تاريخ بدء الإيقاف")
+    pause_until = models.DateTimeField(verbose_name="تاريخ انتهاء الإيقاف")
+    duration_minutes = models.PositiveIntegerField(verbose_name="مدة الإيقاف (دقائق)")
+    reason = models.TextField(blank=True, null=True, verbose_name="سبب الإيقاف")
+    resumed_at = models.DateTimeField(null=True, blank=True, verbose_name="تاريخ إعادة التفعيل")
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="geofence_violation_pauses_created",
+        verbose_name="أنشئ بواسطة",
+    )
+
+    class Meta:
+        verbose_name = "4.2 إيقاف مخالفة النطاق"
+        verbose_name_plural = "4.2 إيقافات مخالفة النطاق"
+        indexes = [
+            models.Index(fields=["employee", "pause_until"]),
+            models.Index(fields=["employee", "location", "pause_until"]),
+        ]
+        ordering = ["-pause_started_at"]
+
+    def __str__(self):
+        loc_txt = getattr(self.location, "name", "جميع المواقع")
+        return f"إيقاف مخالفة لـ {self.employee.full_name} @ {loc_txt}"
+
+    @property
+    def is_active(self) -> bool:
+        now = timezone.now()
+        if self.resumed_at is not None:
+            return False
+        if self.pause_until is None:
+            return False
+        return self.pause_until >= now
+
+    def mark_resumed(self, *, at: Optional[datetime] = None, save: bool = True):
+        at = at or timezone.now()
+        self.resumed_at = at
+        if save:
+            self.save(update_fields=["resumed_at"])
+
+    @classmethod
+    def _base_active_qs(cls, *, as_of: Optional[datetime] = None):
+        ref = as_of or timezone.now()
+        return cls.objects.filter(resumed_at__isnull=True, pause_until__gte=ref)
+
+    @classmethod
+    def active_for(
+        cls,
+        *,
+        employee: Optional[Employee],
+        location: Optional[Location] = None,
+        as_of: Optional[datetime] = None
+    ):
+        if employee is None:
+            return None
+        ref = as_of or timezone.now()
+        base = cls._base_active_qs(as_of=ref).filter(employee=employee)
+        if location is not None:
+            specific = base.filter(location=location).order_by("-pause_until").first()
+            if specific:
+                return specific
+        return base.filter(location__isnull=True).order_by("-pause_until").first()
+
+    @classmethod
+    def create_or_extend(
+        cls,
+        *,
+        employee: Employee,
+        location: Location | None,
+        duration_minutes: int,
+        reason: Optional[str] = None,
+        created_by: Optional[User] = None,
+        start_at: Optional[datetime] = None,
+    ) -> "GeofenceViolationPause":
+        start_at = start_at or timezone.now()
+        end_at = start_at + timedelta(minutes=duration_minutes)
+        active = cls.active_for(employee=employee, location=location, as_of=start_at)
+        if active:
+            active.pause_started_at = start_at
+            active.pause_until = end_at
+            active.duration_minutes = duration_minutes
+            active.reason = (reason or "").strip() or active.reason
+            active.resumed_at = None
+            if created_by and active.created_by is None:
+                active.created_by = created_by
+            active.save(update_fields=[
+                "pause_started_at", "pause_until", "duration_minutes", "reason", "resumed_at", "created_by"
+            ])
+            return active
+        return cls.objects.create(
+            employee=employee,
+            location=location,
+            pause_started_at=start_at,
+            pause_until=end_at,
+            duration_minutes=duration_minutes,
+            reason=(reason or "").strip() or None,
+            created_by=created_by,
+        )
 
 
 class EmployeeLocationAssignment(BaseModel):

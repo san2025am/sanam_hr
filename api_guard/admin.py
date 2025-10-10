@@ -6,7 +6,7 @@ from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.contrib.contenttypes.models import ContentType
 
 from .models import (
-    EmployeeShiftAssignment, Role, User, Employee, Location, LocationMonitoringConfig,
+    EmployeeShiftAssignment, Role, User, Employee, Location, LocationMonitoringConfig, GeofenceViolationPause,
     EmployeeLocationAssignment, Task, Shift,
     AttendanceRecord, LocationPing, Salary, Report, ReportAttachment, Request, EmployeeLeaveBalance,
     ViolationRule, EmployeeViolation,  # <-- الجديد بدل Violation
@@ -257,6 +257,31 @@ class LocationMonitoringConfigAdmin(admin.ModelAdmin):
         ("التتبع", {"fields": ("ping_interval_seconds", "violation_grace_minutes")}),
         ("المخالفة", {"fields": ("violation_rule", "notes")}),
     )
+
+
+@admin.register(GeofenceViolationPause)
+class GeofenceViolationPauseAdmin(admin.ModelAdmin):
+    list_display = (
+        "employee",
+        "location",
+        "pause_started_at",
+        "pause_until",
+        "duration_minutes",
+        "is_active_flag",
+    )
+    list_filter = ("location", "employee")
+    search_fields = ("employee__full_name", "employee__user__username", "location__name")
+    autocomplete_fields = ("employee", "location", "created_by")
+    readonly_fields = ("is_active_flag",)
+    fieldsets = (
+        (None, {"fields": ("employee", "location", "reason")}),
+        ("الإعدادات", {"fields": ("pause_started_at", "pause_until", "duration_minutes", "resumed_at")}),
+        ("بيانات إضافية", {"fields": ("created_by", "is_active_flag")}),
+    )
+
+    @admin.display(boolean=True, description="مفعل؟")
+    def is_active_flag(self, obj):
+        return obj.is_active
 
 
 @admin.register(Task)

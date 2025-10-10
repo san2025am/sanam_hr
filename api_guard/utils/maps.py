@@ -1,3 +1,4 @@
+from django.utils import timezone
 """
 Map/geo utilities (geofencing, bounds, etc.).
 
@@ -90,6 +91,16 @@ def get_current_shift_window(user):
         unrestricted = bool(getattr(assignment, 'unrestricted', False) or getattr(shift, 'unrestricted', False))
         pre_buf = int(getattr(shift, 'pre_shift_buffer_minutes', 0) or 0)
         post_buf = int(getattr(shift, 'post_shift_buffer_minutes', 0) or 0)
+        # Normalize to aware UTC datetimes if naive
+        try:
+            if start and timezone.is_naive(start):
+                start = timezone.make_aware(start, timezone.get_current_timezone())
+            if end and timezone.is_naive(end):
+                end = timezone.make_aware(end, timezone.get_current_timezone())
+            start = start.astimezone(timezone.utc) if start else None
+            end = end.astimezone(timezone.utc) if end else None
+        except Exception:
+            pass
         return start, end, unrestricted, pre_buf, post_buf
     except Exception:
         return None, None, False, 0, 0

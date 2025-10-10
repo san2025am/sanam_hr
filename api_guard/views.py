@@ -47,6 +47,7 @@ from .models import (
     LocationMonitoringConfig,
     EmployeeShiftAssignment,
     Shift,
+    GeofenceViolationPause,
 )
 from .serializers import (
     GUARD_ROLE_NAMES,
@@ -196,7 +197,18 @@ def _assignment_window_for(
 
 def _monitoring_details(
     location,
-) -> tuple[dict[str, object], bool, int, Optional[int], Optional[int], Optional[ViolationRule], Optional[LocationMonitoringConfig]]:
+    *,
+    employee: Optional[Employee] = None,
+) -> tuple[
+    dict[str, object],
+    bool,
+    int,
+    Optional[int],
+    Optional[int],
+    Optional[ViolationRule],
+    Optional[LocationMonitoringConfig],
+    Optional[GeofenceViolationPause],
+]:
     """
     يعيد (payload, active, grace_minutes, ping_seconds, outside_seconds, rule, config).
     """
@@ -218,6 +230,8 @@ def _monitoring_details(
                 "violation_grace_minutes": GEOFENCE_WARNING_MINUTES,
                 "default_violation_grace_minutes": GEOFENCE_WARNING_MINUTES,
             }, False, GEOFENCE_WARNING_MINUTES, None, None, None, None)
+
+    pause = GeofenceViolationPause.active_for(employee=employee, location=location)
 
     if config:
         rule = getattr(config, "violation_rule", None)
@@ -250,7 +264,23 @@ def _monitoring_details(
         payload["violation_rule_id"] = str(rule.id)
         payload["violation_rule_title"] = rule.title
         payload["violation_rule_action"] = rule.default_action
-    return payload, active, grace_minutes, ping_seconds, outside_seconds, rule, config
+    if pause:
+        payload.update({
+            "violation_paused": True,
+            "violation_pause_reason": pause.reason,
+            "violation_pause_started_at": _local_iso(pause.pause_started_at),
+            "violation_pause_until": _local_iso(pause.pause_until),
+            "violation_pause_duration_minutes": pause.duration_minutes,
+            "violation_pause_location_id": str(getattr(pause.location, "id", "")) if pause.location else None,
+        })
+    else:
+        payload["violation_paused"] = False
+        payload["violation_pause_reason"] = None
+        payload["violation_pause_started_at"] = None
+        payload["violation_pause_until"] = None
+        payload["violation_pause_duration_minutes"] = None
+        payload["violation_pause_location_id"] = None
+    return payload, active, grace_minutes, ping_seconds, outside_seconds, rule, config, pause
 
 
 def _fmt_time(value) -> Optional[str]:
@@ -952,7 +982,8 @@ class AttendanceCheckAPIView(APIView):
          monitoring_ping_seconds,
          monitoring_outside_seconds,
          monitoring_rule,
-         monitoring_config) = _monitoring_details(location)
+         monitoring_config,
+         monitoring_pause) = _monitoring_details(location, employee=employee)
         current_shift_obj = ser.validated_data.get("current_shift")
         current_assignment = ser.validated_data.get("current_assignment")
         shift_payload = _build_shift_payload(
