@@ -19,8 +19,10 @@ from django.shortcuts import render
 from django.contrib.admin.views.decorators import staff_member_required
 
 from django.contrib.auth import authenticate, get_user_model
+from .utils.response import ok, fail  # Standardized JSON envelopes (success/error)
 from rest_framework import generics, status
 from rest_framework.exceptions import PermissionDenied, NotFound
+from .utils.query import OptimizedQuerysetMixin  # Performance: safe select_related/prefetch
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -645,23 +647,23 @@ class GuardLoginAndProfileView(APIView):
         username = (request.data.get("username") or "").strip()
         password = request.data.get("password") or ""
         if not username or not password:
-            return Response({"detail": "اسم المستخدم/كلمة المرور مطلوبة"}, status=400)
+            return ok({"detail": "اسم المستخدم/كلمة المرور مطلوبة"})
 
         user = authenticate(request, username=username, password=password)
         if not user:
-            return Response({"detail": "بيانات دخول غير صحيحة"}, status=401)
+            return ok({"detail": "بيانات دخول غير صحيحة"})
         if not user.is_active:
-            return Response({"detail": "الحساب غير مُفعل"}, status=403)
+            return ok({"detail": "الحساب غير مُفعل"})
 
         role_name = getattr(getattr(user, "role", None), "name", None)
         if (role_name or "").strip().casefold() not in {n.casefold() for n in GUARD_ROLE_NAMES}:
-            return Response({"detail": "الدخول متاح لحُراس الأمن فقط"}, status=403)
+            return ok({"detail": "الدخول متاح لحُراس الأمن فقط"})
 
         try:
             employee = Employee.objects.select_related("user", "user__role").get(user=user)
             Salary.objects.get_or_create(employee=employee)
         except Employee.DoesNotExist:
-            return Response({"detail": "لا يوجد ملف موظف مرتبط بهذا المستخدم"}, status=404)
+            return ok({"detail": "لا يوجد ملف موظف مرتبط بهذا المستخدم"})
 
         device_id = (request.data.get("device_id") or "").strip()
         device_name = (request.data.get("device_name") or "").strip()
@@ -671,7 +673,7 @@ class GuardLoginAndProfileView(APIView):
         otp_code = (otp_code_raw or "").strip()
 
         if not device_id:
-            return Response({"detail": "معرّف الجهاز مفقود. يرجى تحديث التطبيق."}, status=400)
+            return ok({"detail": "معرّف الجهاز مفقود. يرجى تحديث التطبيق."})
 
         now = dj_timezone.now()
         device_hash = _device_hash(device_id)
@@ -682,7 +684,7 @@ class GuardLoginAndProfileView(APIView):
             .first()
         )
         if other_user_entry:
-            return Response({
+            return ok({
                 "detail": "هذا الجهاز مسجل مسبقًا لحساب آخر. يرجى تسجيل الخروج من الحساب السابق أو التواصل مع الإدارة.",
                 "code": "device_used_by_another_user",
             }, status=status.HTTP_403_FORBIDDEN)
@@ -717,17 +719,17 @@ class GuardLoginAndProfileView(APIView):
                         verified_at__isnull=True,
                     )
                 except (DeviceLoginChallenge.DoesNotExist, ValueError):
-                    return Response({"detail": "طلب التحقق غير صالح"}, status=400)
+                    return Response({"detail": "طلب التحقق غير صالح"})
 
                 if challenge.is_expired:
-                    return Response({"detail": "انتهت صلاحية رمز التحقق"}, status=400)
+                    return ok({"detail": "انتهت صلاحية رمز التحقق"})
                 if challenge.attempts >= 5:
-                    return Response({"detail": "تم تجاوز عدد المحاولات المسموح بها"}, status=429)
+                    return ok({"detail": "تم تجاوز عدد المحاولات المسموح بها"})
 
                 if _hash_code(otp_code) != challenge.code_hash:
                     challenge.attempts += 1
                     challenge.save(update_fields=["attempts", "updated_at"])
-                    return Response({"detail": "رمز التحقق غير صحيح"}, status=400)
+                    return ok({"detail": "رمز التحقق غير صحيح"})
 
                 challenge.verified_at = now
                 if device_name and not challenge.device_name:
@@ -744,10 +746,10 @@ class GuardLoginAndProfileView(APIView):
             else:
                 email = (user.email or "").strip()
                 if not email:
-                    return Response({
+                    return ok({
                         "detail": "هذا الجهاز غير موثوق ويستلزم التحقق، لكن لا يوجد بريد إلكتروني لإرسال الرمز. يرجى التواصل مع المسؤول لتحديث بياناتك.",
                         "code": "no_email_available",
-                    }, status=400)
+                    })
 
                 code = f"{secrets.randbelow(1_000_000):06d}"
                 expires_at = now + timedelta(minutes=10)
@@ -770,7 +772,7 @@ class GuardLoginAndProfileView(APIView):
                 except Exception as exc:
                     logger.exception("Failed to dispatch device OTP for user %s", user.pk)
                     if getattr(settings, "DEBUG_SMS_ECHO", False):
-                        return Response({
+                        return ok({
                             "requires_verification": True,
                             "challenge_id": str(challenge.id),
                             "detail": "تعذر إرسال البريد الإلكتروني، تم عرض الرمز مباشرة لأغراض الاختبار.",
@@ -792,7 +794,7 @@ class GuardLoginAndProfileView(APIView):
                     "detail": "هذا الجهاز غير مسجّل ضمن أجهزتك الموثوقة. تم إرسال رمز تحقق إلى بريدك الإلكتروني.",
                     "destination": masked_email,
                     "delivery": "email",
-                }, status=202)
+                })
 
         if active_trusted_device:
             _enforce_single_trusted_device(
@@ -805,7 +807,7 @@ class GuardLoginAndProfileView(APIView):
             emp_data = EmployeeMeSerializer(employee).data
         except DatabaseError as exc:
             logger.exception("Failed to serialize employee profile during guard login: %s", exc)
-            return Response({
+            return ok({
                 "detail": "الخادم غير جاهز بالكامل. يرجى إعادة المحاولة بعد تطبيق التحديثات أو التواصل مع الدعم الفني.",
                 "code": "backend_not_ready",
             }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
@@ -823,7 +825,7 @@ class GuardLoginAndProfileView(APIView):
                 "role_label": str(user.role) if getattr(user, "role", None) else None,
             },
             "employee": emp_data
-        }, status=200)
+        })
 
 
 class GuardMeView(APIView):
@@ -869,6 +871,23 @@ class AttendanceCheckAPIView(APIView):
         return Response(payload, status=status.HTTP_200_OK)
 
     def post(self, request):
+        # Enforce shift window & location
+        start, end, unrestricted, pre_buf, post_buf = get_current_shift_window(request.user)
+        now = timezone.now()
+        if not unrestricted and start and end:
+            start_buf = start - timedelta(minutes=pre_buf or 0)
+            end_buf = end + timedelta(minutes=post_buf or 0)
+            if not (start_buf <= now <= end_buf):
+                return fail('خارج وقت الوردية', code='outside_shift', status=400)
+
+        try:
+            lat = float(request.data.get('lat'))
+            lng = float(request.data.get('lng'))
+        except Exception:
+            return fail('إحداثيات غير صحيحة', code='invalid_coordinates', status=400)
+        allowed, reason, loc_id = is_location_allowed_for_user(request.user, lat, lng)
+        if not allowed:
+            return fail(reason or 'الموقع غير مسموح', code='location_denied', status=400)
         cleanup_employee = (Employee.objects
                               .select_related("user", "supervisor")
                               .filter(user=request.user)
@@ -1618,7 +1637,8 @@ def location_dashboard_feed(request):
     })
 
 
-class GuardReportListCreateView(generics.ListCreateAPIView):
+# TIP: consider using select_related/prefetch_related on queryset for performance.
+class GuardReportListCreateView(OptimizedQuerysetMixin, generics.ListCreateAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = ReportSerializer
 
@@ -1638,7 +1658,8 @@ class GuardReportListCreateView(generics.ListCreateAPIView):
             serializer.save(employee=employee)
 
 
-class GuardRequestListCreateView(generics.ListCreateAPIView):
+# TIP: consider using select_related/prefetch_related on queryset for performance.
+class GuardRequestListCreateView(OptimizedQuerysetMixin, generics.ListCreateAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = RequestSerializer
 
@@ -1656,7 +1677,7 @@ class GuardRequestListCreateView(generics.ListCreateAPIView):
         serializer.save(employee=employee)
 
 
-class GuardAdvanceListCreateView(generics.ListCreateAPIView):
+class GuardAdvanceListCreateView(OptimizedQuerysetMixin, generics.ListCreateAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = AdvanceSerializer
 
@@ -1681,7 +1702,8 @@ class GuardAdvanceListCreateView(generics.ListCreateAPIView):
         serializer.save(employee=employee)
 
 
-class GuardTaskListView(generics.ListAPIView):
+# TIP: consider using select_related/prefetch_related on queryset for performance.
+class GuardTaskListView(OptimizedQuerysetMixin, generics.ListAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = TaskMiniSerializer
 
@@ -1697,7 +1719,7 @@ class GuardTaskListView(generics.ListAPIView):
         return qs
 
 
-class GuardTaskUpdateView(APIView):
+class GuardTaskUpdateView(OptimizedQuerysetMixin, APIView):
     permission_classes = [IsAuthenticated]
 
     def patch(self, request, pk):
@@ -1743,7 +1765,7 @@ class GuardTaskUpdateView(APIView):
         return Response(TaskMiniSerializer(task).data, status=status.HTTP_200_OK)
 
 
-class GuardUniformItemListView(APIView):
+class GuardUniformItemListView(OptimizedQuerysetMixin, APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):

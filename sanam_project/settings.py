@@ -67,19 +67,17 @@ GEOFENCE_OUTSIDE_DEDUCTION_PERCENT = _env_int("GEOFENCE_OUTSIDE_DEDUCTION_PERCEN
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-r!u$2sdna1f&jico%%hm86+gu5-y*7fx0l(z8da(mv&88azw(!'
-
+SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', 'CHANGE_ME_IN_ENV')
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
-
-
+DEBUG = os.getenv('DJANGO_DEBUG', 'True').lower() in ('1','true','yes')
 # أثناء التطوير يمكنك رؤية الكود في الاستجابة:
 DEBUG_SMS_ECHO = True   # ← سنستعمله لإظهار الكود للاختبار فقط
 
 
-ALLOWED_HOSTS = ['*']
-
-
+_raw_hosts = os.getenv('DJANGO_ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
+ALLOWED_HOSTS = [h.strip() for h in _raw_hosts if h.strip()]
+if '31.97.158.157' not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append('31.97.158.157')
 # Application definition
 
 INSTALLED_APPS = [
@@ -250,3 +248,7 @@ SECURE_SSL_REDIRECT = os.getenv("SECURE_SSL_REDIRECT", "False").lower() == "true
 SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "False").lower() == "true"
 CSRF_COOKIE_SECURE = os.getenv("CSRF_COOKIE_SECURE", "False").lower() == "true"
 X_FRAME_OPTIONS = "DENY"
+
+# Optional CORS/CSRF via env
+CORS_ALLOWED_ORIGINS = [o for o in os.getenv('DJANGO_CORS_ALLOWED_ORIGINS','').split(',') if o]
+CSRF_TRUSTED_ORIGINS = [o for o in os.getenv('DJANGO_CSRF_TRUSTED_ORIGINS','').split(',') if o]

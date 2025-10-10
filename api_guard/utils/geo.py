@@ -1,3 +1,9 @@
+"""
+Geospatial helpers (lat/lng parsing, distance calculations).
+
+Auto-added: module-level documentation and gentle guidance.
+This block is safe to remove if you prefer.
+"""
 import math
 from typing import List, Tuple
 
@@ -26,7 +32,7 @@ def point_in_polygon(point: Tuple[float, float], polygon: List[Tuple[float, floa
         # تحقق من تقاطع الحافة مع الشعاع
         cond = ((y1 > y) != (y2 > y))
         if cond:
-          x_intersect = (x2 - x1) * (y - y1) / ((y2 - y1) or 1e-12) + x1
-          if x_intersect > x:
-              inside = not inside
+            x_intersect = (x2 - x1) * (y - y1) / ((y2 - y1) or 1e-12) + x1
+            if x_intersect > x:
+                inside = not inside
     return inside

@@ -1,7 +1,7 @@
 # في ملف api_guard/urls.py
 
 from django.urls import path,include
-from . import views # سنقوم بإنشاء هذه الـ views في الخطوة التالية
+# سنقوم بإنشاء هذه الـ views في الخطوة التالية
 from rest_framework.routers import DefaultRouter
 # 1. إنشاء Router
 router = DefaultRouter()
@@ -28,6 +28,7 @@ from api_guard.views import (
 # 'roles' هو المسار الذي سيتم استخدامه في الـ URL (e.g., /api/v1/roles/)
 
 urlpatterns = [
+    
     # مثال: نقطة نهاية محمية لعرض بيانات المستخدم الحالي
     path("auth/guard/login/", GuardLoginAndProfileView.as_view(), name="guard-login"),
     path("auth/guard/me/", GuardMeView.as_view(), name="guard-me"),

@@ -18,7 +18,6 @@ from django import forms
 from django.core.exceptions import ValidationError
 
 
-from .utils.maps import parse_google_maps_latlng, LatLngNotFound  # لو كنت قد أضفتها سابقًا
 
 # =========================
 # Inlines

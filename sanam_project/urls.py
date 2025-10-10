@@ -24,10 +24,11 @@ from rest_framework_simplejwt.views import (
     TokenObtainPairView,
     TokenRefreshView,
 )
+from django.http import HttpResponse
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-
+   path('', lambda request: HttpResponse('API is running')),
     # هذا السطر صحيح ومهم، لكنه يعالج فقط الروابط داخل تطبيق api_guard
     # مثل /api/v1/users/me/
     path('api/v1/', include('api_guard.urls')), 
