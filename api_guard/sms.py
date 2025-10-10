@@ -1,44 +1,84 @@
+from __future__ import annotations
 
-# # api_guard/sms.py
-# import os
-# import requests
+import logging
+import os
+from typing import Final
 
-# # يجب أن تكون هذه "أسماء" متغيرات البيئة، وليس القيم
-# TWILIO_SID   = os.getenv("TWILIO_ACCOUNT_SID", "AC4c745068124b3f49da80d7b87fc271c6")
-# TWILIO_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "ec88f3f09f1912c57232a88c8401b98d")
-# TWILIO_FROM  = os.getenv("TWILIO_FROM", "+19713091287")                # مثال: +19713091287
-# TWILIO_MSID  = os.getenv("TWILIO_MESSAGING_SERVICE_SID", "")  # بديل اختياري
+import requests
+from requests.auth import HTTPBasicAuth
 
-# def send_sms_twilio(to: str, body: str) -> None:
-#     """إرسال عبر Twilio مع رسائل خطأ واضحة."""
-#     if not (TWILIO_SID and TWILIO_TOKEN and (TWILIO_FROM or TWILIO_MSID)):
-#         raise RuntimeError(
-#             "Twilio env vars missing "
-#             "(TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_FROM or TWILIO_MESSAGING_SERVICE_SID)"
-#         )
+logger = logging.getLogger(__name__)
 
-#     url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_SID}/Messages.json"
-#     data = {"To": to, "Body": body}
-#     if TWILIO_MSID:
-#         data["MessagingServiceSid"] = TWILIO_MSID
-#     else:
-#         data["From"] = TWILIO_FROM
+TWILIO_ACCOUNT_SID: Final[str | None] = os.getenv("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN: Final[str | None] = os.getenv("TWILIO_AUTH_TOKEN")
+TWILIO_FROM: Final[str | None] = os.getenv("TWILIO_FROM")
+TWILIO_MESSAGING_SERVICE_SID: Final[str | None] = os.getenv("TWILIO_MESSAGING_SERVICE_SID")
 
-#     resp = requests.post(url, data=data, auth=(TWILIO_SID, TWILIO_TOKEN), timeout=20)
-#     if resp.status_code >= 300:
-#         raise RuntimeError(f"Twilio {resp.status_code}: {resp.text}")
+GATEWAY_URL: Final[str | None] = os.getenv("SMS_GATEWAY_URL")
+GATEWAY_KEY: Final[str | None] = os.getenv("SMS_GATEWAY_KEY")
+GATEWAY_SENDER: Final[str | None] = os.getenv("SMS_SENDER_ID")
 
 
-# # (اختياري) بوابة محلية
-# GATEWAY_URL   = os.getenv("SMS_GATEWAY_URL", "")
-# GATEWAY_KEY   = os.getenv("SMS_GATEWAY_KEY", "")
-# GATEWAY_SENDER= os.getenv("SMS_SENDER_ID", "")
+def send_sms_twilio(to: str, body: str) -> None:
+    """Send an SMS through Twilio's REST API."""
+    if not to:
+        raise ValueError("SMS recipient number is required")
+    if not body:
+        raise ValueError("SMS body is required")
 
-# def send_sms_gateway(to: str, body: str) -> None:
-#     if not (GATEWAY_URL and GATEWAY_KEY and GATEWAY_SENDER):
-#         raise RuntimeError("SMS gateway env vars missing (SMS_GATEWAY_URL / SMS_GATEWAY_KEY / SMS_SENDER_ID)")
-#     r = requests.post(GATEWAY_URL,
-#                       json={"to": to, "message": body, "sender": GATEWAY_SENDER, "api_key": GATEWAY_KEY},
-#                       timeout=20)
-#     if r.status_code >= 300:
-#         raise RuntimeError(f"Gateway {r.status_code}: {r.text}")
+    if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN):
+        raise RuntimeError("Twilio credentials are not configured")
+    if not (TWILIO_FROM or TWILIO_MESSAGING_SERVICE_SID):
+        raise RuntimeError("Twilio sender is not configured")
+
+    url = f"https://api.twilio.com/2010-04-01/Accounts/{TWILIO_ACCOUNT_SID}/Messages.json"
+    payload = {"To": to, "Body": body}
+    if TWILIO_MESSAGING_SERVICE_SID:
+        payload["MessagingServiceSid"] = TWILIO_MESSAGING_SERVICE_SID
+    else:
+        payload["From"] = TWILIO_FROM
+
+    try:
+        response = requests.post(
+            url,
+            data=payload,
+            auth=HTTPBasicAuth(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+            timeout=20,
+        )
+    except requests.RequestException as exc:  # pragma: no cover - network failure
+        logger.error("Twilio request failed for %s: %s", to, exc)
+        raise RuntimeError(f"Twilio request failed: {exc}") from exc
+
+    if response.status_code >= 300:
+        logger.error("Twilio returned %s for %s: %s", response.status_code, to, response.text)
+        raise RuntimeError(f"Twilio returned {response.status_code}: {response.text}")
+
+
+def send_sms_gateway(to: str, body: str) -> None:
+    """Optional helper for a custom SMS gateway."""
+    if not to:
+        raise ValueError("SMS recipient number is required")
+    if not body:
+        raise ValueError("SMS body is required")
+
+    if not (GATEWAY_URL and GATEWAY_KEY and GATEWAY_SENDER):
+        raise RuntimeError("SMS gateway is not configured")
+
+    try:
+        response = requests.post(
+            GATEWAY_URL,
+            json={
+                "to": to,
+                "message": body,
+                "sender": GATEWAY_SENDER,
+                "api_key": GATEWAY_KEY,
+            },
+            timeout=20,
+        )
+    except requests.RequestException as exc:  # pragma: no cover - network failure
+        logger.error("SMS gateway request failed for %s: %s", to, exc)
+        raise RuntimeError(f"SMS gateway request failed: {exc}") from exc
+
+    if response.status_code >= 300:
+        logger.error("SMS gateway returned %s for %s: %s", response.status_code, to, response.text)
+        raise RuntimeError(f"SMS gateway returned {response.status_code}: {response.text}")
