@@ -2,7 +2,7 @@
 # Patched: shift window normalized to timezone-aware UTC; location allow helper.
 
 from django.utils import timezone
-from .geo import haversine_distance_m  # ensure correct import path
+from .geo import haversine_m  # ensure correct import path
 
 def get_current_shift_window(user):
     """Returns (start_utc, end_utc, unrestricted, pre_buf_min, post_buf_min)."""
@@ -40,7 +40,7 @@ def is_location_allowed_for_user(user, lat: float, lng: float):
         lng0 = getattr(location, 'lng', None) or getattr(location, 'longitude', None)
         if lat0 is None or lng0 is None:
             return True, None, getattr(location, 'id', None) if location else None
-        d = haversine_distance_m(float(lat0), float(lng0), float(lat), float(lng))
+        d = haversine_m(float(lat0), float(lng0), float(lat), float(lng))
         if d <= radius_m:
             return True, None, str(getattr(location, 'id', None)) if location else None
         return False, f"خارج النطاق ({int(d)}م > {int(radius_m)}م)", str(getattr(location, 'id', None)) if location else None
