@@ -907,6 +907,21 @@ class GuardMeView(APIView):
 # =========================
 
 
+# -*- coding: utf-8 -*-
+# Drop-in replacement for your AttendanceCheckAPIView with consistent reason_code
+# and early validations (location_id, bio_ok, bio_method, device hash).
+#
+# NOTE: Keep your existing imports and helpers. Below we reference helpers you already use:
+#   - _local_iso, _normalize_action_incoming, get_current_shift_window, is_location_allowed_for_user
+#   - tz, timedelta, fail, AttendanceRecord, AttendanceCheckSerializer
+#   - flag_absent_assignments_for_employee, close_stale_attendance_for_employee
+#   - _monitoring_details, _build_shift_payload, record_geofence_violation, _purge_location_pings_for_employee
+#
+# You only need to replace your class definition with this one.
+#
+
+
+logger = logging.getLogger("api_guard")
 
 class AttendanceCheckAPIView(APIView):
     permission_classes = [IsAuthenticated]
@@ -919,7 +934,7 @@ class AttendanceCheckAPIView(APIView):
             "performed": False,
             "action": action,
             "detail": detail,
-            "reason_code": reason_code,
+            "reason_code": str(reason_code or "UNKNOWN"),
         }
         wnd = {}
         if start is not None: wnd["from"] = _local_iso(start)
@@ -929,17 +944,83 @@ class AttendanceCheckAPIView(APIView):
         if extra: payload.update(extra)
         if monitoring is not None:
             payload["monitoring"] = monitoring
+        logger.info("ATTENDANCE DENY: %s", payload)
         return Response(payload, status=status.HTTP_200_OK)
+
+    def _early_payload_validation(self, request):
+        """
+        تحققات مبكرة على الحمولة headers+body قبل الدخول في بقية المنطق.
+        ترجع (Response|None).
+        """
+        data = request.data
+
+        # 1) تطبيع action مبكرًا
+        normalized_action = _normalize_action_incoming(data.get("action"))
+        if normalized_action is None:
+            return Response({
+                "ok": False, "performed": False,
+                "action": data.get("action"),
+                "detail": "إجراء غير معروف",
+                "reason_code": "INVALID_ACTION",
+            }, status=status.HTTP_200_OK)
+
+        # 2) التحقق من الموقع (location_id > 0)
+        try:
+            loc_id = int(data.get("location_id"))
+        except Exception:
+            loc_id = 0
+        if loc_id <= 0:
+            return self._deny(action=normalized_action, detail="موقع غير محدد", reason_code="INVALID_LOCATION")
+
+        # 3) التحقق البيومتري من جهة العميل
+        bio_ok = bool(data.get("bio_ok"))
+        bio_method = (data.get("bio_method") or "").lower().strip()
+        if not bio_ok:
+            # نحافظ على 403 كما في كودك الأصلي للبيومتري
+            return Response({
+                "ok": False,
+                "performed": False,
+                "detail": "التحقق البيومتري فشل، لا يمكن تنفيذ العملية.",
+                "reason_code": "BIO_FAIL",
+            }, status=status.HTTP_403_FORBIDDEN)
+        if bio_method not in ("fingerprint", "face", "pin"):
+            return self._deny(action=normalized_action, detail="طريقة البصمة غير معروفة",
+                              reason_code="BIO_METHOD_UNKNOWN",
+                              extra={"accepted": ["fingerprint","face","pin"], "got": bio_method})
+
+        # 4) GPS
+        try:
+            lat = float(data.get("lat"))
+            lng = float(data.get("lng"))
+            acc = float(data.get("accuracy") or 0.0)
+        except Exception:
+            return self._deny(action=normalized_action, detail="إحداثيات غير صحيحة", reason_code="INVALID_COORDINATES")
+        # مستوى الدقة الأدنى (يمكن تعديله)
+        if acc > 100.0:
+            return self._deny(action=normalized_action, detail="دقة GPS منخفضة", reason_code="GPS_ACCURACY_LOW",
+                              extra={"min_required": 100, "accuracy": acc})
+
+        # 5) ربط الجهاز (اختياري — اذا كان مفعل عندك)
+        device_hash = request.headers.get("X-Device-Hash") or data.get("device_hash")
+        if self._device_binding_enabled():
+            if not device_hash:
+                return self._deny(action=normalized_action, detail="جهاز غير موثّق", reason_code="DEVICE_NOT_TRUSTED")
+            if not self._is_device_allowed(request.user, device_hash):
+                return self._deny(action=normalized_action, detail="جهاز غير موثّق", reason_code="DEVICE_NOT_TRUSTED")
+
+        return None  # كل شيء سليم
 
     def _enforce_shift_and_location(self, request):
         """
         يعيد (None, None) لو كل شيء سليم.
         يعيد (Response, normalized_action) إن كان هناك رفض (fail) مبكر.
         """
+        data = request.data
+
         # تطبيع action مبكرًا
-        normalized_action = _normalize_action_incoming(request.data.get("action"))
+        normalized_action = _normalize_action_incoming(data.get("action"))
         if normalized_action is None:
-            return fail("Invalid action", code="bad_action", status=400), None
+            return self._deny(action=data.get("action"), detail="إجراء غير معروف", reason_code="INVALID_ACTION"), None
 
         # نافذة الوردية (UTC + buffers)
         start, end, unrestricted, pre_buf, post_buf = get_current_shift_window(request.user)
@@ -948,25 +1029,25 @@ class AttendanceCheckAPIView(APIView):
             start_buf = start - timedelta(minutes=pre_buf or 0)
             end_buf = end + timedelta(minutes=post_buf or 0)
             if not (start_buf <= now_utc <= end_buf):
-                return fail("خارج وقت الوردية", code="outside_shift", status=400), None
+                return self._deny(action=normalized_action, detail="خارج وقت الوردية", reason_code="OUTSIDE_SHIFT_WINDOW"), None
 
         # تحقق الإحداثيات
         try:
-            lat = float(request.data.get("lat"))
-            lng = float(request.data.get("lng"))
-            acc = float(request.data.get("accuracy") or 0.0)
+            lat = float(data.get("lat"))
+            lng = float(data.get("lng"))
+            acc = float(data.get("accuracy") or 0.0)
         except Exception:
-            return fail("إحداثيات غير صحيحة", code="invalid_coordinates", status=400), None
+            return self._deny(action=normalized_action, detail="إحداثيات غير صحيحة", reason_code="INVALID_COORDINATES"), None
 
-        # تحقق الموقع
+        # تحقق الموقع (اعتمادًا على موقع المستخدم والإحداثيات)
         allowed, reason, loc_id = is_location_allowed_for_user(request.user, lat, lng)
         if not allowed:
-            return fail(reason or "الموقع غير مسموح", code="location_denied", status=400), None
+            return self._deny(action=normalized_action, detail=reason or "الموقع غير مسموح", reason_code="LOCATION_DENIED"), None
 
         return None, normalized_action
 
     def post(self, request):
-        # خطوة تنظيف تلقائية اختيارية (لا تغيّر السلوك الوظيفي)
+        # تنظيف تلقائي اختياري
         cleanup_employee = (
             Employee.objects.select_related("user", "supervisor")
             .filter(user=request.user)
@@ -974,22 +1055,23 @@ class AttendanceCheckAPIView(APIView):
         )
         if cleanup_employee:
             cleanup_now = tz.now()
-            flag_absent_assignments_for_employee(
-                cleanup_employee, as_of=cleanup_now, notify=True
-            )
-            close_stale_attendance_for_employee(
-                cleanup_employee, as_of=cleanup_now, notify=True
-            )
+            flag_absent_assignments_for_employee(cleanup_employee, as_of=cleanup_now, notify=True)
+            close_stale_attendance_for_employee(cleanup_employee, as_of=cleanup_now, notify=True)
+
+        # تحققات مبكرة (location_id, bio, device hash, gps accuracy)
+        prelim = self._early_payload_validation(request)
+        if prelim is not None:
+            return prelim
 
         # فرض الوردية والموقع وصحة الإحداثيات + تطبيع action
         early_fail, normalized_action = self._enforce_shift_and_location(request)
         if early_fail is not None:
-            return early_fail  # يحتوي code/status واضحين
+            return early_fail
 
-        # تحقق الـ serializer لالتقاط باقي القيم (الموظف/الموقع/نافذة الوردية...)
+        # تحقق serializer
         ser = AttendanceCheckSerializer(data=request.data, context={"request": request})
         if not ser.is_valid():
-            # صياغة رسالة مفصلة بدل "تحقق من الحقول"
+            # صياغة مفصلة
             err_text = []
             nice_hint = None
             for field, msgs in ser.errors.items():
@@ -999,10 +1081,8 @@ class AttendanceCheckAPIView(APIView):
                     final_msgs.append(msg_text)
                     final_lower = msg_text.casefold()
                     if "valid uuid" in final_lower or "uuid" in final_lower:
-                        nice_hint = (
-                            "تعذر تحديد موقع العمل. يرجى التأكد من اختيار الموقع الصحيح"
-                            " أو إعادة محاولة تحديد الموقع تلقائيًا ثم إعادة المحاولة."
-                        )
+                        nice_hint = ("تعذر تحديد موقع العمل. يرجى التأكد من اختيار الموقع الصحيح "
+                                     "أو إعادة محاولة تحديد الموقع تلقائيًا ثم إعادة المحاولة.")
                 err_text.append(f"{field}: {', '.join(final_msgs)}")
 
             nice = nice_hint or ("؛ ".join(err_text) if err_text else "الرجاء التحقق من الحقول المدخلة.")
@@ -1011,22 +1091,22 @@ class AttendanceCheckAPIView(APIView):
                 "action": normalized_action or request.data.get("action"),
                 "detail": f"تعذر معالجة الطلب. {nice}",
                 "errors": ser.errors,
-                "code": "invalid_payload",
+                "reason_code": "INVALID_PAYLOAD",
             }, status=status.HTTP_200_OK)
 
-        # التحقق البيومتري (إجباري)
+        # التحقق البيومتري (خلفي – إن أردت فرضه من السيرفر أيضًا)
         if not ser.validated_data.get("biometric_verified", False):
             return Response(
                 {
                     "ok": False,
                     "performed": False,
                     "detail": "التحقق البيومتري فشل، لا يمكن تسجيل الحضور.",
-                    "code": "biometric_failed",
+                    "reason_code": "BIO_FAIL",
                 },
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        # استخراج القيم من الـ serializer
+        # استخراج القيم
         action            = normalized_action or ser.validated_data.get("action")
         employee          = ser.validated_data.get("employee")
         location          = ser.validated_data.get("location_obj")
@@ -1085,7 +1165,7 @@ class AttendanceCheckAPIView(APIView):
             return self._deny(
                 action=action,
                 detail=reason or "⚠️ لا يمكن تنفيذ العملية في الوقت الحالي.",
-                reason_code="business_rule_violation",
+                reason_code="BUSINESS_RULE_VIOLATION",
                 start=start_dt, end=end_dt, now=now_local,
                 monitoring=monitoring_payload,
                 extra={
@@ -1106,7 +1186,7 @@ class AttendanceCheckAPIView(APIView):
                 return self._deny(
                     action=action,
                     detail="⚠️ تم تسجيل حضور مسبقًا، لا يمكن تسجيل حضور آخر قبل الانصراف.",
-                    reason_code="already_checked_in",
+                    reason_code="ALREADY_CHECKED_IN",
                     start=start_dt, end=end_dt, now=now_local,
                     monitoring=monitoring_payload,
                     extra={"should_monitor_location": monitoring_should_follow, "shift": shift_payload},
@@ -1123,7 +1203,7 @@ class AttendanceCheckAPIView(APIView):
                 return self._deny(
                     action=action,
                     detail="⚠️ تم تسجيل حضور مسبقًا اليوم.",
-                    reason_code="already_checked_in_today",
+                    reason_code="ALREADY_CHECKED_IN_TODAY",
                     start=start_dt, end=end_dt, now=now_local,
                     monitoring=monitoring_payload,
                     extra={"should_monitor_location": monitoring_should_follow, "shift": shift_payload},
@@ -1196,7 +1276,7 @@ class AttendanceCheckAPIView(APIView):
                 return self._deny(
                     action=action,
                     detail="⚠️ تم تسجيل انصراف مبكر اليوم؛ لا يمكن الانصراف العادي.",
-                    reason_code="early_checkout_done",
+                    reason_code="EARLY_CHECKOUT_DONE",
                     start=start_dt, end=end_dt, now=now_local,
                     monitoring=monitoring_payload,
                     extra={"should_monitor_location": monitoring_should_follow, "shift": shift_payload},
@@ -1209,7 +1289,7 @@ class AttendanceCheckAPIView(APIView):
                 return self._deny(
                     action=action,
                     detail="لا يوجد سجل حضور مفتوح لإقفاله.",
-                    reason_code="no_open_record",
+                    reason_code="NO_OPEN_RECORD",
                     monitoring=monitoring_payload,
                     extra={"should_monitor_location": monitoring_should_follow, "shift": shift_payload},
                 )
@@ -1278,7 +1358,7 @@ class AttendanceCheckAPIView(APIView):
                 return self._deny(
                     action=action,
                     detail="لا يوجد سجل حضور مفتوح لإقفاله.",
-                    reason_code="no_open_record",
+                    reason_code="NO_OPEN_RECORD",
                     monitoring=monitoring_payload,
                     extra={"should_monitor_location": monitoring_should_follow, "shift": shift_payload},
                 )
@@ -1294,7 +1374,7 @@ class AttendanceCheckAPIView(APIView):
                 return self._deny(
                     action=action,
                     detail="⚠️ تم تسجيل انصراف مبكر مسبقًا اليوم.",
-                    reason_code="early_checkout_once_per_day",
+                    reason_code="EARLY_CHECKOUT_ONCE_PER_DAY",
                     start=start_dt, end=end_dt, now=now_local,
                     monitoring=monitoring_payload,
                     extra={"should_monitor_location": monitoring_should_follow, "shift": shift_payload},
@@ -1306,7 +1386,7 @@ class AttendanceCheckAPIView(APIView):
                 return self._deny(
                     action=action,
                     detail="يجب كتابة سبب الانصراف المبكر.",
-                    reason_code="early_checkout_reason_required",
+                    reason_code="EARLY_CHECKOUT_REASON_REQUIRED",
                     monitoring=monitoring_payload,
                     extra={"should_monitor_location": monitoring_should_follow, "shift": shift_payload},
                 )
@@ -1357,7 +1437,7 @@ class AttendanceCheckAPIView(APIView):
                 "early_reason": reason_txt,
                 "record_id": str(rec.id),
                 "employee": getattr(employee, "full_name", str(employee.pk)),
-                "location_id": str(rec.location.id) if rec.location else None,
+                "location_id": str(rec.id) if rec.location else None,
                 "location_name": getattr(rec.location, "name", None) if rec.location else None,
                 "distance_m": round(dist, 2) if raw_dist is not None else None,
                 "location_center": {"lat": center_lat, "lng": center_lng, "radius_m": radius},
@@ -1371,14 +1451,22 @@ class AttendanceCheckAPIView(APIView):
                 "should_monitor_location": False,
             }, status=status.HTTP_200_OK)
 
-        # أي إجراء غير مدعوم (لن يصل غالبًا بسبب التطبيع)
+        # أي إجراء غير مدعوم
         return self._deny(
             action=action,
             detail="إجراء غير مدعوم.",
-            reason_code="unsupported_action",
+            reason_code="UNSUPPORTED_ACTION",
             monitoring=monitoring_payload,
             extra={"should_monitor_location": monitoring_should_follow, "shift": shift_payload},
         )
+
+    # ====== Helpers to wire up device-binding (replace stubs with your DB logic) ======
+    def _device_binding_enabled(self):
+        return True
+
+    def _is_device_allowed(self, user, device_hash: str):
+        # TODO: ادمج مع TrustedDevice/DeviceLoginChallenge
+        return True
 
 class ResolveLocationAPIView(APIView):
     permission_classes = [IsAuthenticated]
