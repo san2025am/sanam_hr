@@ -386,7 +386,10 @@ class EmployeeMeSerializer(serializers.ModelSerializer):
 
 
 class AttendanceCheckSerializer(serializers.Serializer):
+    # نقبل location_id كنص/رقم، ونسمح أيضًا بحقل بديل "location"
     location_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    location = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
     action = serializers.ChoiceField(choices=[
         ("check_in", "check_in"),
         ("check_out", "check_out"),
@@ -395,11 +398,15 @@ class AttendanceCheckSerializer(serializers.Serializer):
     lat = serializers.FloatField()
     lng = serializers.FloatField()
     accuracy = serializers.FloatField(required=False, min_value=0, default=9999)
-    biometric_verified = serializers.BooleanField(default=False)
+
+    # مفاتيح البصمة القديمة/الجديدة
+    biometric_verified = serializers.BooleanField(required=False, default=False)
     biometric_method = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     biometric_attempts = serializers.IntegerField(required=False, min_value=0, default=0)
+    bio_ok = serializers.BooleanField(required=False)              # بديل قديم
+    bio_method = serializers.CharField(required=False, allow_blank=True, allow_null=True)  # بديل قديم
 
-    # ===== أدوات مساعدة هندسية =====
+    # ===== أدوات مساعدة هندسية (كما لديك) =====
     @staticmethod
     def _haversine_m(lat1, lon1, lat2, lon2):
         from math import radians, sin, cos, asin, sqrt
@@ -452,17 +459,46 @@ class AttendanceCheckSerializer(serializers.Serializer):
         except Employee.DoesNotExist:
             raise serializers.ValidationError("لا يوجد ملف موظف مرتبط بهذا الحساب.")
 
-        # الموقع
-        try:
-            location = Location.objects.get(id=attrs["location_id"])
-        except Location.DoesNotExist:
-            raise serializers.ValidationError({"location_id": "الموقع غير موجود أو مُعرّف غير صالح."})
+        # الموقع: استخدم الموقع المحلول مبكرًا إن وُجد، وإلا حلّه هنا بمرونة
+        location = self.context.get("resolved_location")
+        if location is None:
+            raw_loc = (attrs.get("location_id") or attrs.get("location") or "")
+            if isinstance(raw_loc, str):
+                raw_loc = raw_loc.strip()
+            if not raw_loc:
+                raise serializers.ValidationError({"location_id": "موقع غير محدد."})
+
+            # جرّب كما هو (يدعم نص/رقم)
+            try:
+                location = Location.objects.filter(pk=raw_loc).first()
+            except Exception:
+                location = None
+            # وإن فشل، جرّب int
+            if location is None:
+                try:
+                    location = Location.objects.filter(pk=int(raw_loc)).first()
+                except Exception:
+                    location = None
+
+            if location is None:
+                raise serializers.ValidationError({"location_id": "الموقع غير موجود أو مُعرّف غير صالح."})
 
         lat = attrs["lat"]; lng = attrs["lng"]
         acc = attrs.get("accuracy", 9999.0)
         action = (attrs.get("action") or "").strip().lower()
 
-        # ===== فحص الهوية =====
+        # ===== تطبيع/قبول مفاتيح البصمة القديمة/الجديدة =====
+        bio_ok = bool(attrs.get("biometric_verified") or attrs.get("bio_ok"))
+        bio_method = (attrs.get("biometric_method") or attrs.get("bio_method") or "")
+        bio_method = (bio_method or "").lower().strip()
+        if not bio_ok:
+            attrs.update({"employee": employee, "location_obj": location})
+            raise serializers.ValidationError({"biometric_verified": "التحقق البيومتري مطلوب."})
+        if bio_method not in {"fingerprint", "face", "pin"}:
+            attrs.update({"employee": employee, "location_obj": location})
+            raise serializers.ValidationError({"biometric_method": "طريقة غير صالحة. المقبول: fingerprint/face/pin"})
+
+        # ===== فحص الهوية/العقد كما في كودك الأصلي (بدون تغيير) =====
         today = dj_timezone.localdate()
         if getattr(employee, "id_expiry_date", None):
             if employee.id_expiry_date < today:
@@ -473,7 +509,6 @@ class AttendanceCheckSerializer(serializers.Serializer):
                 })
                 return attrs
 
-        # ===== فحص العقد (موجود + موقّع + نشِط) =====
         contracts_qs = Contract.objects.filter(employee=employee)
         if not contracts_qs.exists():
             attrs.update({
@@ -500,11 +535,11 @@ class AttendanceCheckSerializer(serializers.Serializer):
             attrs.update({
                 "employee": employee, "location_obj": location,
                 "blocked": True,
-                "blocked_reason": "⚠️ لا يمكن التسجيل: لا يوجد عقد نشط.",
+                "blocked_reason": "⚠️ لا يوجد عقد نشط.",
             })
             return attrs
 
-        # ===== فحص الموقع (دقة/مضلّع/نصف قطر) =====
+        # ===== فحص الموقع (نفس منطقك مع إرجاع رسائل واضحة) =====
         violation_messages = []
         violation_codes: list[str] = []
         attrs["violation"] = False
@@ -577,7 +612,7 @@ class AttendanceCheckSerializer(serializers.Serializer):
                 )
                 violation_codes.append("outside_radius")
 
-        # ===== حساب نافذة الوردية =====
+        # ===== حساب نافذة الوردية (كما لديك) =====
         now_aware = dj_timezone.now()
         now_local = dj_timezone.localtime(now_aware)
 
@@ -600,7 +635,6 @@ class AttendanceCheckSerializer(serializers.Serializer):
             if not (start_t and end_t):
                 continue
 
-            # لو التعيين مرتبط بموقع محدد تأكد أنه نفس الموقع
             if getattr(a, "location_id", None) and a.location_id != location.id:
                 continue
 
@@ -613,7 +647,6 @@ class AttendanceCheckSerializer(serializers.Serializer):
             window_start = start_dt - pre_buffer
             window_end = end_dt + post_buffer
 
-            # يجب أن يغطي الوقت الحالي ضمن النافذة الممتدة
             try:
                 if not (window_start <= now_local <= window_end):
                     continue
@@ -643,7 +676,6 @@ class AttendanceCheckSerializer(serializers.Serializer):
                     win_r = min(window_end, grace_end)
                     ok = (win_l <= now_local <= win_r)
                 elif action in ("check_out", "early_check_out"):
-                    # الانصراف العادي: بعد السماح | الانصراف المبكر: سيتحقق لاحقاً من الحضور أولاً
                     if a.checkout_grace_hours is not None:
                         threshold_min = int(round(float(a.checkout_grace_hours) * 60))
                     elif a.checkout_grace is not None:
@@ -697,8 +729,7 @@ class AttendanceCheckSerializer(serializers.Serializer):
             })
             return attrs
 
-        # ===== قيود إضافية خاصة بالأفعال =====
-        # منع الحضور مرتين في نفس اليوم
+        # قيود إضافية كما لديك
         if action == "check_in":
             day_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
             day_end   = day_start + timedelta(days=1)
@@ -716,7 +747,6 @@ class AttendanceCheckSerializer(serializers.Serializer):
                 })
                 return attrs
 
-        # الانصراف المبكر: يجب أن يوجد سجل مفتوح + لم يُسجّل مبكرًا اليوم
         if action == "early_check_out":
             open_rec = (AttendanceRecord.objects
                         .filter(employee=employee, check_out_time__isnull=True)
@@ -729,7 +759,6 @@ class AttendanceCheckSerializer(serializers.Serializer):
                 })
                 return attrs
 
-            # مرة واحدة في اليوم
             day_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
             day_end   = day_start + timedelta(days=1)
             if AttendanceRecord.objects.filter(
@@ -752,6 +781,7 @@ class AttendanceCheckSerializer(serializers.Serializer):
             attrs["violation"] = False
             attrs["violation_reason"] = None
 
+        # حقول موحّدة نهائية
         attrs.update({
             "employee": employee,
             "location_obj": location,
@@ -763,6 +793,8 @@ class AttendanceCheckSerializer(serializers.Serializer):
             "blocked_reason": None,
             "now_local": now_local,
             "shift_within_window": True,
+            "biometric_verified": bio_ok,
+            "biometric_method": bio_method,
         })
         return attrs
 
@@ -797,7 +829,6 @@ class AttendanceCheckSerializer(serializers.Serializer):
 
         rec = AttendanceRecord.objects.create(**kwargs)
         return rec
-
 
 class ResolveLocationSerializer(serializers.Serializer):
     lat = serializers.FloatField()

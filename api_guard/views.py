@@ -687,17 +687,33 @@ class AttendanceCheckAPIView(APIView):
                 "reason_code": "INVALID_ACTION",
             }, status=status.HTTP_200_OK)
 
-        # location_id
-        try:
-            loc_id = int(data.get("location_id"))
-        except Exception:
-            loc_id = 0
-        if loc_id <= 0:
-            return self._deny(action=normalized_action, detail="موقع غير محدد", reason_code="INVALID_LOCATION")
+        # ===== location_id (قبول نص/رقم + رسائل أوضح) =====
+        raw_loc = (data.get("location_id") or data.get("location") or "").strip() if isinstance(data.get("location_id") or data.get("location"), str) else (data.get("location_id") or data.get("location"))
+        location = None
+        if raw_loc not in (None, "", 0, "0"):
+            # جرّب مباشرة بالـ pk كما هو (يدعم نص/رقم)
+            try:
+                location = Location.objects.filter(pk=raw_loc).first()
+            except Exception:
+                location = None
+            # إن لم يُعثر عليه، جرّب تحويله إلى int
+            if location is None:
+                try:
+                    location = Location.objects.filter(pk=int(raw_loc)).first()
+                except Exception:
+                    location = None
 
-        # biometric (client)
-        bio_ok = bool(data.get("bio_ok"))
-        bio_method = (data.get("bio_method") or "").lower().strip()
+        if location is None:
+            return self._deny(
+                action=normalized_action,
+                detail="موقع غير محدد: مُعرّف الموقع غير صالح أو غير موجود.",
+                reason_code="INVALID_LOCATION",
+                extra={"got": (raw_loc if raw_loc not in (None, "", 0, "0") else None)}
+            )
+
+        # biometric (قبول مفاتيح قديمة/جديدة)
+        bio_ok = bool(data.get("bio_ok") or data.get("biometric_verified"))
+        bio_method = (data.get("bio_method") or data.get("biometric_method") or "").lower().strip()
         if not bio_ok:
             return Response({
                 "ok": False,
@@ -706,9 +722,12 @@ class AttendanceCheckAPIView(APIView):
                 "reason_code": "BIO_FAIL",
             }, status=status.HTTP_403_FORBIDDEN)
         if bio_method not in ("fingerprint", "face", "pin"):
-            return self._deny(action=normalized_action, detail="طريقة البصمة غير معروفة",
-                              reason_code="BIO_METHOD_UNKNOWN",
-                              extra={"accepted": ["fingerprint","face","pin"], "got": bio_method})
+            return self._deny(
+                action=normalized_action,
+                detail="طريقة البصمة غير معروفة",
+                reason_code="BIO_METHOD_UNKNOWN",
+                extra={"accepted": ["fingerprint","face","pin"], "got": bio_method or None},
+            )
 
         # GPS
         try:
@@ -727,6 +746,8 @@ class AttendanceCheckAPIView(APIView):
             if not device_hash or not self._is_device_allowed(request.user, device_hash):
                 return self._deny(action=normalized_action, detail="جهاز غير موثّق", reason_code="DEVICE_NOT_TRUSTED")
 
+        # خزّن الموقع المحلول في request للخطوات اللاحقة لتفادي إعادة الجلب
+        request._resolved_location = location
         return None
 
     def _enforce_shift_and_location(self, request):
@@ -778,7 +799,7 @@ class AttendanceCheckAPIView(APIView):
         if early_fail is not None:
             return early_fail
 
-        ser = AttendanceCheckSerializer(data=request.data, context={"request": request})
+        ser = AttendanceCheckSerializer(data=request.data, context={"request": request, "resolved_location": getattr(request, "_resolved_location", None)})
         if not ser.is_valid():
             # رسالة مفصلة
             err_text = []
@@ -813,6 +834,7 @@ class AttendanceCheckAPIView(APIView):
                 },
                 status=status.HTTP_403_FORBIDDEN,
             )
+
 
         # القيم
         action            = normalized_action or ser.validated_data.get("action")
