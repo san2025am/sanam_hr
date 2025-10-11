@@ -1,36 +1,39 @@
 from __future__ import annotations
-# تعديل لوقت ارسال النبضات وتحققات
+
+# تعديل شامل: تحويل كل الـ endpoints إلى POST + تحسينات الحضور والنبضات والجيوفنس
 import datetime as dt
 import hashlib
 import secrets
 import logging
 from datetime import timedelta
-from django.utils import timezone as tz
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
-
-from api_guard.utils.maps import get_current_shift_window, is_location_allowed_for_user
-
 from typing import Optional, Sequence
 
 from django.conf import settings
 from django.core.mail import send_mail
-from django.utils import timezone as dj_timezone
-from django.db import IntegrityError, DatabaseError
+from django.db import IntegrityError, DatabaseError, transaction
 from django.db.models import F, OuterRef, Subquery, Q
 from django.http import JsonResponse
 from django.shortcuts import render
 from django.contrib.admin.views.decorators import staff_member_required
-
 from django.contrib.auth import authenticate, get_user_model
-from .utils.response import ok, fail  # Standardized JSON envelopes (success/error)
+from django.utils import timezone as dj_timezone
+from django.utils import timezone  # لاستخدام timezone.now بصيغة واضحة
+
 from rest_framework import generics, status
 from rest_framework.exceptions import PermissionDenied, NotFound
-from .utils.query import OptimizedQuerysetMixin  # Performance: safe select_related/prefetch
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
+
+from .utils.response import ok, fail
+from .utils.query import OptimizedQuerysetMixin
+from api_guard.utils.maps import (
+    get_current_shift_window,
+    is_location_allowed_for_user,
+)
 
 from .models import (
     AttendanceRecord,
@@ -52,6 +55,7 @@ from .models import (
     Shift,
     GeofenceViolationPause,
 )
+
 from .serializers import (
     GUARD_ROLE_NAMES,
     AttendanceMiniSerializer,
@@ -68,6 +72,7 @@ from .serializers import (
     TaskMiniSerializer,
     GuardTaskUpdateSerializer,
 )
+
 from .emailer import send_email_otp
 from .services.attendance import (
     close_stale_attendance_for_employee,
@@ -75,13 +80,11 @@ from .services.attendance import (
 )
 from .sms import send_sms_twilio
 
-
 User = get_user_model()
-
-
 logger = logging.getLogger(__name__)
+logger_api = logging.getLogger("api_guard")
 
-# Default to 60 minutes (1 hour) so the violation aligns with the business rule
+# إعدادات الجيوفنس الافتراضية
 GEOFENCE_WARNING_MINUTES = int(getattr(settings, "GEOFENCE_OUTSIDE_WARNING_MINUTES", 60))
 GEOFENCE_RULE_TITLE = "الخروج عن نطاق الموقع"
 GEOFENCE_RULE_DESCRIPTION = (
@@ -94,19 +97,42 @@ except (InvalidOperation, TypeError, ValueError):
 if GEOFENCE_DEDUCTION_PERCENT < 0:
     GEOFENCE_DEDUCTION_PERCENT = Decimal("0")
 
-def _local_iso(dt):
-    if not dt:
+
+def _make_aware(dt_value):
+    if dt_value is None:
         return None
-    try:
-        return tz.localtime(dt).isoformat()
-    except Exception:
-        return dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
+    if dj_timezone.is_naive(dt_value):
+        tz = dj_timezone.get_current_timezone()
+        return dj_timezone.make_aware(dt_value, tz)
+    return dt_value
+
+
+def _local_dt(dt_value):
+    aware = _make_aware(dt_value)
+    if aware is None:
+        return None
+    return dj_timezone.localtime(aware)
+
+
+def _local_iso(dt_value):
+    local = _local_dt(dt_value)
+    return local.isoformat() if local else None
+
+
+def _fmt_time(value) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, dt.datetime):
+        value = value.timetz()
+    if isinstance(value, dt.time):
+        return value.strftime("%H:%M")
+    return str(value)
+
 
 def _normalize_action_incoming(raw):
     """
-    يطبع أي صيغة واردة إلى صيغة داخلية موحّدة:
+    تطبيع أي صيغة واردة إلى:
       check_in | check_out | early_check_out
-    أمثلة مدعومة: checkin / check-in / check_in / signin / checkout / check-out / check_out / signout / early*...
     """
     if not raw:
         return None
@@ -152,424 +178,7 @@ def _apply_geofence_salary_deduction(employee: Employee, percent: Decimal) -> De
     return deduction
 
 
-def _make_aware(dt_value):
-    if dt_value is None:
-        return None
-    if dj_timezone.is_naive(dt_value):
-        tz = dj_timezone.get_current_timezone()
-        return dj_timezone.make_aware(dt_value, tz)
-    return dt_value
-
-
-def _local_dt(dt_value):
-    aware = _make_aware(dt_value)
-    if aware is None:
-        return None
-    return dj_timezone.localtime(aware)
-
-
-def _local_iso(dt_value):
-    local = _local_dt(dt_value)
-    return local.isoformat() if local else None
-
-
-def _assignment_window_for(
-    *,
-    employee: Employee,
-    location,
-    reference: Optional[dt.datetime] = None,
-) -> tuple[Optional[EmployeeShiftAssignment], Optional[Shift], Optional[dt.datetime], Optional[dt.datetime]]:
-    """
-    يعثر على تعيين الوردية الحالي (مع الأخذ بعين الاعتبار السماحات قبل/بعد الوردية).
-    """
-    if reference is None:
-        reference = dj_timezone.now()
-    local_reference = _local_dt(reference)
-    if local_reference is None:
-        return None, None, None, None
-
-    qs = (EmployeeShiftAssignment.objects
-          .select_related("shift", "location")
-          .filter(employee=employee, active=True))
-    if location is not None:
-        qs = qs.filter(Q(location__isnull=True) | Q(location=location))
-    qs = qs.order_by("-date", "-id")
-
-    for assignment in qs:
-        shift = assignment.shift
-        if shift is None:
-            continue
-
-        start_t = assignment.start_time or shift.start_time
-        end_t = assignment.end_time or shift.end_time
-        if not (start_t and end_t):
-            continue
-
-        anchor = assignment.date or None
-        start_dt, end_dt = AttendanceCheckSerializer._anchor_times(local_reference, start_t, end_t, anchor_date=anchor)
-        pre_buf_min = int(getattr(assignment, "pre_shift_buffer_minutes", 0) or 0)
-        post_buf_min = int(getattr(assignment, "post_shift_buffer_minutes", 0) or 0)
-        window_start = start_dt - timedelta(minutes=pre_buf_min)
-        window_end = end_dt + timedelta(minutes=post_buf_min)
-
-        try:
-            within_window = window_start <= local_reference <= window_end
-        except Exception:
-            within_window = False
-
-        if within_window:
-            return assignment, shift, window_start, window_end
-
-    return None, None, None, None
-
-
-def _monitoring_details(
-    location,
-    *,
-    employee: Optional[Employee] = None,
-) -> tuple[
-    dict[str, object],
-    bool,
-    int,
-    Optional[int],
-    Optional[int],
-    Optional[ViolationRule],
-    Optional[LocationMonitoringConfig],
-    Optional[GeofenceViolationPause],
-]:
-    """
-    يعيد (payload, active, grace_minutes, ping_seconds, outside_seconds, rule, config).
-    """
-    config: Optional[LocationMonitoringConfig] = None
-    rule: Optional[ViolationRule] = None
-    active = False
-    ping_seconds: Optional[int] = None
-    grace_minutes = GEOFENCE_WARNING_MINUTES
-
-    if location:
-        try:
-            config = location.monitoring_config  # type: ignore[attr-defined]
-        except LocationMonitoringConfig.DoesNotExist:
-            config = None
-        except DatabaseError as exc:
-            logger.warning("Monitoring config unavailable for location %s: %s", getattr(location, "id", None), exc)
-            return ({
-                "active": False,
-                "violation_grace_minutes": GEOFENCE_WARNING_MINUTES,
-                "default_violation_grace_minutes": GEOFENCE_WARNING_MINUTES,
-            }, False, GEOFENCE_WARNING_MINUTES, None, None, None, None)
-
-    pause = GeofenceViolationPause.active_for(employee=employee, location=location)
-
-    if config:
-        rule = getattr(config, "violation_rule", None)
-        active = bool(config.is_active)
-        if active:
-            ping_val = int(config.ping_interval_seconds or 0)
-            ping_seconds = ping_val if ping_val > 0 else None
-            grace_val = int(config.violation_grace_minutes or 0)
-            if grace_val > 0:
-                grace_minutes = grace_val
-        else:
-            ping_seconds = None
-
-    outside_seconds: Optional[int] = None
-    if ping_seconds:
-        outside_seconds = max(60, ping_seconds // 2 or 1)
-
-    payload: dict[str, object] = {
-        "active": active,
-        "violation_grace_minutes": grace_minutes,
-        "default_violation_grace_minutes": GEOFENCE_WARNING_MINUTES,
-    }
-    if ping_seconds:
-        payload["ping_interval_seconds"] = ping_seconds
-    if outside_seconds:
-        payload["suggested_outside_ping_seconds"] = outside_seconds
-    if config:
-        payload["config_id"] = str(config.id)
-    if rule:
-        payload["violation_rule_id"] = str(rule.id)
-        payload["violation_rule_title"] = rule.title
-        payload["violation_rule_action"] = rule.default_action
-    if pause:
-        payload.update({
-            "violation_paused": True,
-            "violation_pause_reason": pause.reason,
-            "violation_pause_started_at": _local_iso(pause.pause_started_at),
-            "violation_pause_until": _local_iso(pause.pause_until),
-            "violation_pause_duration_minutes": pause.duration_minutes,
-            "violation_pause_location_id": str(getattr(pause.location, "id", "")) if pause.location else None,
-        })
-    else:
-        payload["violation_paused"] = False
-        payload["violation_pause_reason"] = None
-        payload["violation_pause_started_at"] = None
-        payload["violation_pause_until"] = None
-        payload["violation_pause_duration_minutes"] = None
-        payload["violation_pause_location_id"] = None
-    return payload, active, grace_minutes, ping_seconds, outside_seconds, rule, config, pause
-
-
-def _fmt_time(value) -> Optional[str]:
-    if value is None:
-        return None
-    if isinstance(value, dt.datetime):
-        value = value.timetz()
-    if isinstance(value, dt.time):
-        return value.strftime("%H:%M")
-    return str(value)
-
-
-def _build_shift_payload(
-    *,
-    employee: Optional[Employee],
-    shift,
-    assignment,
-    allowed_start,
-    allowed_end,
-    location,
-    within_shift: Optional[bool],
-) -> Optional[dict[str, object]]:
-    if shift is None and assignment is None:
-        return None
-
-    if assignment is None and employee is not None and shift is not None:
-        qs = (EmployeeShiftAssignment.objects
-              .select_related("shift", "location")
-              .filter(employee=employee, active=True, shift=shift))
-        if location is not None:
-            qs = qs.filter(Q(location__isnull=True) | Q(location=location))
-        assignment = qs.order_by("-date", "-id").first()
-
-    shift_name = getattr(shift, "name", None) if shift else None
-    shift_start_time = None
-    shift_end_time = None
-    if assignment is not None:
-        shift_start_time = assignment.start_time or getattr(assignment.shift, "start_time", None)
-        shift_end_time = assignment.end_time or getattr(assignment.shift, "end_time", None)
-    elif shift is not None:
-        shift_start_time = getattr(shift, "start_time", None)
-        shift_end_time = getattr(shift, "end_time", None)
-
-    payload: dict[str, object] = {
-        "id": str(getattr(shift, "id", "")) if shift else None,
-        "name": shift_name,
-        "start_time": _fmt_time(shift_start_time),
-        "end_time": _fmt_time(shift_end_time),
-        "window_start": _local_iso(allowed_start),
-        "window_end": _local_iso(allowed_end),
-        "within_shift": bool(within_shift) if within_shift is not None else None,
-    }
-
-    if assignment is not None:
-        payload.update({
-            "assignment_id": str(assignment.id),
-            "assignment_location_id": str(assignment.location_id) if assignment.location_id else None,
-            "assignment_location_name": getattr(assignment.location, "name", None) if assignment.location else None,
-            "pre_shift_buffer_minutes": getattr(assignment, "pre_shift_buffer_minutes", 0),
-            "post_shift_buffer_minutes": getattr(assignment, "post_shift_buffer_minutes", 0),
-        })
-    if location is not None:
-        payload["location_id"] = str(location.id)
-        if assignment is not None and assignment.location_id:
-            payload["matches_location"] = bool(assignment.location_id == location.id)
-        elif "matches_location" not in payload:
-            payload["matches_location"] = True
-
-    return payload
-
-
-def _send_geofence_alert(
-    *,
-    employee: Employee,
-    location,
-    reason: str,
-    distance: Optional[float],
-    radius: Optional[float],
-    outside_minutes: Optional[float],
-    deduction_percent: Optional[Decimal],
-    deduction_value: Optional[Decimal],
-    warning_minutes: Optional[int] = None,
-) -> None:
-    location_name = getattr(location, "name", "الموقع المحدد") if location else "الموقع المحدد"
-    client_name = getattr(location, "client_name", "") if location else ""
-    distance_txt = f"{round(distance or 0.0, 2)} متر"
-    radius_txt = f"{int(radius or 0)} متر"
-    duration_txt = ""
-    if outside_minutes is not None:
-        duration_txt = f" مدة الابتعاد التقريبية {int(round(outside_minutes))} دقيقة."
-    deduction_txt = ""
-    if deduction_value is not None and deduction_value > 0:
-        percent_part = ""
-        if deduction_percent is not None and deduction_percent > 0:
-            percent_part = f" بنسبة {_format_decimal(deduction_percent)}%"
-        deduction_txt = (
-            f" تم تطبيق خصم{percent_part}"
-            f" بقيمة {_format_decimal(deduction_value)}."
-        )
-
-    limit_minutes = warning_minutes or GEOFENCE_WARNING_MINUTES
-    message = (
-        f"تنبيه مخالفة موقع للحارس {employee.full_name}."
-        f" السبب: {reason or 'خارج نطاق الموقع'}."
-        f" الموقع: {location_name}"
-    )
-    if client_name:
-        message = f"{message} - العميل: {client_name}"
-    message = (
-        f"{message}. المسافة الحالية عن مركز الموقع {distance_txt} مقابل نطاق مسموح {radius_txt}."
-        f"{duration_txt} يجب عدم تجاوز {limit_minutes} دقيقة خارج النطاق."
-        f"{deduction_txt}"
-    )
-
-    emails = []
-    employee_email = getattr(getattr(employee, "user", None), "email", None)
-    if employee_email:
-        emails.append(employee_email)
-    supervisor = getattr(employee, "supervisor", None)
-    supervisor_email = getattr(getattr(supervisor, "user", None), "email", None)
-    if supervisor_email:
-        emails.append(supervisor_email)
-    hr_emails = getattr(settings, "GEOFENCE_ALERT_RECIPIENTS", None)
-    if hr_emails:
-        emails.extend([addr for addr in hr_emails if addr])
-    unique_emails = list({addr for addr in emails if addr})
-    from_email = getattr(settings, "DEFAULT_FROM_EMAIL", None)
-    if unique_emails and from_email:
-        try:
-            send_mail(
-                subject="تنبيه مخالفة الخروج عن الموقع",
-                message=message,
-                from_email=from_email,
-                recipient_list=unique_emails,
-                fail_silently=True,
-            )
-        except Exception as exc:  # pragma: no cover - depends on backend
-            logger.warning("Failed to send geofence violation email: %s", exc)
-
-    sms_numbers = []
-    if getattr(employee, "phone_number", None):
-        sms_numbers.append(employee.phone_number)
-    if supervisor and getattr(supervisor, "phone_number", None):
-        sms_numbers.append(supervisor.phone_number)
-    for number in {num for num in sms_numbers if num}:
-        try:
-            send_sms_twilio(number, message)
-        except Exception as exc:  # pragma: no cover - external service
-            logger.warning("Failed to send geofence violation SMS to %s: %s", number, exc)
-
-
-def record_geofence_violation(
-    *,
-    employee: Employee,
-    location,
-    reason: Optional[str],
-    distance: Optional[float],
-    radius: Optional[float],
-    codes: Sequence[str] | None,
-    outside_minutes: Optional[float],
-    attendance_record: Optional[AttendanceRecord] = None,
-    warning_minutes: Optional[int] = None,
-    violation_rule: Optional[ViolationRule] = None,
-) -> EmployeeViolation:
-    summary = reason or "تم رصد خروج عن نطاق الموقع المحدد."
-    dist_text = f"{round(distance or 0.0, 2)}م"
-    radius_text = f"{int(radius or 0)}م"
-    duration_text = None
-    if outside_minutes is not None:
-        duration_text = f"{int(round(outside_minutes))} دقيقة تقريباً"
-
-    rule_obj = violation_rule
-    if rule_obj is None:
-        rule_obj, _created = ViolationRule.objects.get_or_create(
-            title=GEOFENCE_RULE_TITLE,
-            defaults={
-                "description": GEOFENCE_RULE_DESCRIPTION,
-                "default_action": "deduct" if GEOFENCE_DEDUCTION_PERCENT > 0 else "warn",
-                "default_deduction_percent": GEOFENCE_DEDUCTION_PERCENT,
-            },
-        )
-    rule_percent = _decimal_or_zero(getattr(rule_obj, "default_deduction_percent", None))
-    deduction_percent = rule_percent if rule_percent > 0 else GEOFENCE_DEDUCTION_PERCENT
-    deduction_value = _apply_geofence_salary_deduction(employee, deduction_percent)
-    if deduction_value <= 0:
-        deduction_percent = Decimal("0")
-    else:
-        updates = {}
-        if rule_obj.default_action != "deduct":
-            updates["default_action"] = "deduct"
-        if rule_percent <= 0 and deduction_percent > 0:
-            updates["default_deduction_percent"] = deduction_percent
-        if updates:
-            for field, value in updates.items():
-                setattr(rule_obj, field, value)
-            rule_obj.save(update_fields=list(updates.keys()))
-
-    if attendance_record:
-        note_parts = []
-        if attendance_record.notes:
-            note_parts.append(attendance_record.notes)
-        note = f"[GEOFENCE] {summary} (المسافة {dist_text} / النطاق {radius_text})"
-        if duration_text:
-            note = f"{note} - مدة الابتعاد {duration_text}"
-        if deduction_value > 0:
-            note = (
-                f"{note} - خصم {_format_decimal(deduction_percent)}%"
-                f" بقيمة {_format_decimal(deduction_value)}"
-            )
-        note_parts.append(note)
-        attendance_record.notes = "\n".join(part for part in note_parts if part)
-        attendance_record.is_violation = True
-        attendance_record.save(update_fields=["notes", "is_violation"])
-
-    warning_level = (
-        EmployeeViolation.objects.filter(employee=employee, rule=rule_obj).count() + 1
-    )
-
-    description = f"{summary} المسافة الحالية {dist_text} (النطاق {radius_text})."
-    if duration_text:
-        description = f"{description} استمر الابتعاد لمدة {duration_text}."
-    if codes:
-        description = f"{description} الرموز: {', '.join(codes)}."
-    if deduction_value > 0:
-        description = (
-            f"{description} تم تطبيق خصم بنسبة {_format_decimal(deduction_percent)}%"
-            f" بقيمة {_format_decimal(deduction_value)}."
-        )
-
-    violation = EmployeeViolation.objects.create(
-        employee=employee,
-        rule=rule_obj,
-        reported_by=getattr(employee, "supervisor", None),
-        location=location,
-        description=description,
-        warning_level=warning_level,
-        deduction_value=deduction_value,
-    )
-
-    _send_geofence_alert(
-        employee=employee,
-        location=location,
-        reason=summary,
-        distance=distance,
-        radius=radius,
-        outside_minutes=outside_minutes,
-        deduction_percent=deduction_percent if deduction_percent > 0 else None,
-        deduction_value=deduction_value if deduction_value > 0 else None,
-        warning_minutes=warning_minutes,
-    )
-    return violation
-
-
-def _purge_location_pings_for_employee(employee: Employee) -> None:
-    if not employee:
-        return
-    LocationPing.objects.filter(employee=employee, violation_triggered=False).delete()
-
-
 _GUARD_ROLE_NAMES_CI = {name.casefold() for name in GUARD_ROLE_NAMES}
-
 TASK_STATUS_FLOW = ['new', 'accepted', 'in_progress', 'completed']
 
 
@@ -666,6 +275,137 @@ def _require_guard_employee(user):
     except Employee.DoesNotExist as exc:
         raise NotFound("لا يوجد ملف موظف مرتبط بهذا الحساب") from exc
 
+
+def _assignment_window_for(
+    *,
+    employee: Employee,
+    location,
+    reference: Optional[dt.datetime] = None,
+) -> tuple[Optional[EmployeeShiftAssignment], Optional[Shift], Optional[dt.datetime], Optional[dt.datetime]]:
+    """
+    يعثر على تعيين الوردية الحالي (مع الأخذ بعين الاعتبار السماحات قبل/بعد الوردية).
+    """
+    if reference is None:
+        reference = dj_timezone.now()
+    local_reference = _local_dt(reference)
+    if local_reference is None:
+        return None, None, None, None
+
+    qs = (EmployeeShiftAssignment.objects
+          .select_related("shift", "location")
+          .filter(employee=employee, active=True))
+    if location is not None:
+        qs = qs.filter(Q(location__isnull=True) | Q(location=location))
+    qs = qs.order_by("-date", "-id")
+
+    for assignment in qs:
+        shift = assignment.shift
+        if shift is None:
+            continue
+
+        start_t = assignment.start_time or shift.start_time
+        end_t = assignment.end_time or shift.end_time
+        if not (start_t and end_t):
+            continue
+
+        anchor = assignment.date or None
+        start_dt, end_dt = AttendanceCheckSerializer._anchor_times(local_reference, start_t, end_t, anchor_date=anchor)
+        pre_buf_min = int(getattr(assignment, "pre_shift_buffer_minutes", 0) or 0)
+        post_buf_min = int(getattr(assignment, "post_shift_buffer_minutes", 0) or 0)
+        window_start = start_dt - timedelta(minutes=pre_buf_min)
+        window_end = end_dt + timedelta(minutes=post_buf_min)
+
+        try:
+            within_window = window_start <= local_reference <= window_end
+        except Exception:
+            within_window = False
+
+        if within_window:
+            return assignment, shift, window_start, window_end
+
+    return None, None, None, None
+
+
+def _monitoring_details(
+    location,
+    *,
+    employee: Optional[Employee] = None,
+):
+    """
+    يعيد (payload, active, grace_minutes, ping_seconds, outside_seconds, rule, config, pause).
+    """
+    config: Optional[LocationMonitoringConfig] = None
+    rule: Optional[ViolationRule] = None
+    active = False
+    ping_seconds: Optional[int] = None
+    grace_minutes = GEOFENCE_WARNING_MINUTES
+
+    pause = GeofenceViolationPause.active_for(employee=employee, location=location) if location else None
+
+    if location:
+        try:
+            config = location.monitoring_config  # type: ignore[attr-defined]
+        except LocationMonitoringConfig.DoesNotExist:
+            config = None
+        except DatabaseError as exc:
+            logger.warning("Monitoring config unavailable for location %s: %s", getattr(location, "id", None), exc)
+            return ({
+                "active": False,
+                "violation_grace_minutes": GEOFENCE_WARNING_MINUTES,
+                "default_violation_grace_minutes": GEOFENCE_WARNING_MINUTES,
+            }, False, GEOFENCE_WARNING_MINUTES, None, None, None, None, None)
+
+    if config:
+        rule = getattr(config, "violation_rule", None)
+        active = bool(config.is_active)
+        if active:
+            ping_val = int(config.ping_interval_seconds or 0)
+            ping_seconds = ping_val if ping_val > 0 else None
+            grace_val = int(config.violation_grace_minutes or 0)
+            if grace_val > 0:
+                grace_minutes = grace_val
+        else:
+            ping_seconds = None
+
+    outside_seconds: Optional[int] = None
+    if ping_seconds:
+        outside_seconds = max(60, ping_seconds // 2 or 1)
+
+    payload: dict[str, object] = {
+        "active": active,
+        "violation_grace_minutes": grace_minutes,
+        "default_violation_grace_minutes": GEOFENCE_WARNING_MINUTES,
+    }
+    if ping_seconds:
+        payload["ping_interval_seconds"] = ping_seconds
+    if outside_seconds:
+        payload["suggested_outside_ping_seconds"] = outside_seconds
+    if config:
+        payload["config_id"] = str(config.id)
+    if rule:
+        payload["violation_rule_id"] = str(rule.id)
+        payload["violation_rule_title"] = rule.title
+        payload["violation_rule_action"] = rule.default_action
+    if pause:
+        payload.update({
+            "violation_paused": True,
+            "violation_pause_reason": pause.reason,
+            "violation_pause_started_at": _local_iso(pause.pause_started_at),
+            "violation_pause_until": _local_iso(pause.pause_until),
+            "violation_pause_duration_minutes": pause.duration_minutes,
+            "violation_pause_location_id": str(getattr(pause.location, "id", "")) if pause.location else None,
+        })
+    else:
+        payload["violation_paused"] = False
+        payload["violation_pause_reason"] = None
+        payload["violation_pause_started_at"] = None
+        payload["violation_pause_until"] = None
+        payload["violation_pause_duration_minutes"] = None
+        payload["violation_pause_location_id"] = None
+    return payload, active, grace_minutes, ping_seconds, outside_seconds, rule, config, pause
+
+
+# =============== المصادقة وكلمة المرور ===============
 
 class GuardLoginView(TokenObtainPairView):
     serializer_class = GuardTokenObtainPairSerializer
@@ -827,8 +567,7 @@ class GuardLoginAndProfileView(APIView):
                 )
                 try:
                     send_email_otp(email, subject, body)
-                except Exception as exc:
-                    logger.exception("Failed to dispatch device OTP for user %s", user.pk)
+                except Exception:
                     if getattr(settings, "DEBUG_SMS_ECHO", False):
                         return ok({
                             "requires_verification": True,
@@ -838,7 +577,6 @@ class GuardLoginAndProfileView(APIView):
                             "delivery": "debug",
                             "debug_code": code,
                         }, status=status.HTTP_202_ACCEPTED)
-
                     challenge.delete(hard=True)
                     return Response({
                         "detail": "تعذر إرسال رمز التحقق. يرجى المحاولة لاحقًا أو التواصل مع الإدارة لتوثيق الجهاز.",
@@ -887,7 +625,7 @@ class GuardLoginAndProfileView(APIView):
 
 
 class GuardMeView(APIView):
-    """يعيد بيانات الموظف الحالي."""
+    """يعيد بيانات الموظف الحالي — تم تحويله إلى POST."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -903,32 +641,14 @@ class GuardMeView(APIView):
 
 
 # =========================
-# Attendance
+# Attendance (POST-only)
 # =========================
-
-
-# -*- coding: utf-8 -*-
-# Drop-in replacement for your AttendanceCheckAPIView with consistent reason_code
-# and early validations (location_id, bio_ok, bio_method, device hash).
-#
-# NOTE: Keep your existing imports and helpers. Below we reference helpers you already use:
-#   - _local_iso, _normalize_action_incoming, get_current_shift_window, is_location_allowed_for_user
-#   - tz, timedelta, fail, AttendanceRecord, AttendanceCheckSerializer
-#   - flag_absent_assignments_for_employee, close_stale_attendance_for_employee
-#   - _monitoring_details, _build_shift_payload, record_geofence_violation, _purge_location_pings_for_employee
-#
-# You only need to replace your class definition with this one.
-#
-
-
-logger = logging.getLogger("api_guard")
 
 class AttendanceCheckAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def _deny(self, *, action, detail, reason_code,
               start=None, end=None, now=None, extra=None, monitoring=None):
-        """رفض منطق الأعمال مع status=200 ورسالة واضحة قابلة للعرض في التطبيق."""
         payload = {
             "ok": False,
             "performed": False,
@@ -944,17 +664,20 @@ class AttendanceCheckAPIView(APIView):
         if extra: payload.update(extra)
         if monitoring is not None:
             payload["monitoring"] = monitoring
-        logger.info("ATTENDANCE DENY: %s", payload)
+        logger_api.info("ATTENDANCE DENY: %s", payload)
         return Response(payload, status=status.HTTP_200_OK)
 
+    def _device_binding_enabled(self):
+        return True
+
+    def _is_device_allowed(self, user, device_hash: str):
+        # اربطه بجدول TrustedDevice إن رغبت
+        return True
+
     def _early_payload_validation(self, request):
-        """
-        تحققات مبكرة على الحمولة headers+body قبل الدخول في بقية المنطق.
-        ترجع (Response|None).
-        """
         data = request.data
 
-        # 1) تطبيع action مبكرًا
+        # action
         normalized_action = _normalize_action_incoming(data.get("action"))
         if normalized_action is None:
             return Response({
@@ -964,7 +687,7 @@ class AttendanceCheckAPIView(APIView):
                 "reason_code": "INVALID_ACTION",
             }, status=status.HTTP_200_OK)
 
-        # 2) التحقق من الموقع (location_id > 0)
+        # location_id
         try:
             loc_id = int(data.get("location_id"))
         except Exception:
@@ -972,11 +695,10 @@ class AttendanceCheckAPIView(APIView):
         if loc_id <= 0:
             return self._deny(action=normalized_action, detail="موقع غير محدد", reason_code="INVALID_LOCATION")
 
-        # 3) التحقق البيومتري من جهة العميل
+        # biometric (client)
         bio_ok = bool(data.get("bio_ok"))
         bio_method = (data.get("bio_method") or "").lower().strip()
         if not bio_ok:
-            # نحافظ على 403 كما في كودك الأصلي للبيومتري
             return Response({
                 "ok": False,
                 "performed": False,
@@ -988,90 +710,77 @@ class AttendanceCheckAPIView(APIView):
                               reason_code="BIO_METHOD_UNKNOWN",
                               extra={"accepted": ["fingerprint","face","pin"], "got": bio_method})
 
-        # 4) GPS
+        # GPS
         try:
-            lat = float(data.get("lat"))
-            lng = float(data.get("lng"))
             acc = float(data.get("accuracy") or 0.0)
+            float(data.get("lat"))
+            float(data.get("lng"))
         except Exception:
             return self._deny(action=normalized_action, detail="إحداثيات غير صحيحة", reason_code="INVALID_COORDINATES")
-        # مستوى الدقة الأدنى (يمكن تعديله)
         if acc > 100.0:
             return self._deny(action=normalized_action, detail="دقة GPS منخفضة", reason_code="GPS_ACCURACY_LOW",
                               extra={"min_required": 100, "accuracy": acc})
 
-        # 5) ربط الجهاز (اختياري — اذا كان مفعل عندك)
+        # Device bind (اختياري)
         device_hash = request.headers.get("X-Device-Hash") or data.get("device_hash")
         if self._device_binding_enabled():
-            if not device_hash:
-                return self._deny(action=normalized_action, detail="جهاز غير موثّق", reason_code="DEVICE_NOT_TRUSTED")
-            if not self._is_device_allowed(request.user, device_hash):
+            if not device_hash or not self._is_device_allowed(request.user, device_hash):
                 return self._deny(action=normalized_action, detail="جهاز غير موثّق", reason_code="DEVICE_NOT_TRUSTED")
 
-        return None  # كل شيء سليم
+        return None
 
     def _enforce_shift_and_location(self, request):
-        """
-        يعيد (None, None) لو كل شيء سليم.
-        يعيد (Response, normalized_action) إن كان هناك رفض (fail) مبكر.
-        """
         data = request.data
 
-        # تطبيع action مبكرًا
         normalized_action = _normalize_action_incoming(data.get("action"))
         if normalized_action is None:
             return self._deny(action=data.get("action"), detail="إجراء غير معروف", reason_code="INVALID_ACTION"), None
 
-        # نافذة الوردية (UTC + buffers)
+        # نافذة الوردية
         start, end, unrestricted, pre_buf, post_buf = get_current_shift_window(request.user)
-        now_utc = tz.now().astimezone(tz.utc)
+        now_utc = dj_timezone.now().astimezone(dj_timezone.utc)
         if not unrestricted and start and end:
             start_buf = start - timedelta(minutes=pre_buf or 0)
             end_buf = end + timedelta(minutes=post_buf or 0)
             if not (start_buf <= now_utc <= end_buf):
                 return self._deny(action=normalized_action, detail="خارج وقت الوردية", reason_code="OUTSIDE_SHIFT_WINDOW"), None
 
-        # تحقق الإحداثيات
+        # إحداثيات + الموقع
         try:
             lat = float(data.get("lat"))
             lng = float(data.get("lng"))
-            acc = float(data.get("accuracy") or 0.0)
         except Exception:
             return self._deny(action=normalized_action, detail="إحداثيات غير صحيحة", reason_code="INVALID_COORDINATES"), None
 
-        # تحقق الموقع (اعتمادًا على موقع المستخدم والإحداثيات)
-        allowed, reason, loc_id = is_location_allowed_for_user(request.user, lat, lng)
+        allowed, reason, _loc_id = is_location_allowed_for_user(request.user, lat, lng)
         if not allowed:
             return self._deny(action=normalized_action, detail=reason or "الموقع غير مسموح", reason_code="LOCATION_DENIED"), None
 
         return None, normalized_action
 
     def post(self, request):
-        # تنظيف تلقائي اختياري
+        # تنظيف (اختياري)
         cleanup_employee = (
             Employee.objects.select_related("user", "supervisor")
             .filter(user=request.user)
             .first()
         )
         if cleanup_employee:
-            cleanup_now = tz.now()
+            cleanup_now = dj_timezone.now()
             flag_absent_assignments_for_employee(cleanup_employee, as_of=cleanup_now, notify=True)
             close_stale_attendance_for_employee(cleanup_employee, as_of=cleanup_now, notify=True)
 
-        # تحققات مبكرة (location_id, bio, device hash, gps accuracy)
         prelim = self._early_payload_validation(request)
         if prelim is not None:
             return prelim
 
-        # فرض الوردية والموقع وصحة الإحداثيات + تطبيع action
         early_fail, normalized_action = self._enforce_shift_and_location(request)
         if early_fail is not None:
             return early_fail
 
-        # تحقق serializer
         ser = AttendanceCheckSerializer(data=request.data, context={"request": request})
         if not ser.is_valid():
-            # صياغة مفصلة
+            # رسالة مفصلة
             err_text = []
             nice_hint = None
             for field, msgs in ser.errors.items():
@@ -1094,7 +803,6 @@ class AttendanceCheckAPIView(APIView):
                 "reason_code": "INVALID_PAYLOAD",
             }, status=status.HTTP_200_OK)
 
-        # التحقق البيومتري (خلفي – إن أردت فرضه من السيرفر أيضًا)
         if not ser.validated_data.get("biometric_verified", False):
             return Response(
                 {
@@ -1106,7 +814,7 @@ class AttendanceCheckAPIView(APIView):
                 status=status.HTTP_403_FORBIDDEN,
             )
 
-        # استخراج القيم
+        # القيم
         action            = normalized_action or ser.validated_data.get("action")
         employee          = ser.validated_data.get("employee")
         location          = ser.validated_data.get("location_obj")
@@ -1144,8 +852,8 @@ class AttendanceCheckAPIView(APIView):
         violation_reason  = ser.validated_data.get("violation_reason")
         violation_codes   = list(ser.validated_data.get("violation_codes") or [])
 
-        now       = tz.now()
-        now_local = tz.localtime(now)
+        now       = dj_timezone.now()
+        now_local = _local_dt(now)
 
         start_dt  = ser.validated_data.get("shift_window_start")
         end_dt    = ser.validated_data.get("shift_window_end")
@@ -1174,11 +882,9 @@ class AttendanceCheckAPIView(APIView):
                 },
             )
 
-        # ===== تنفيذ الإجراءات =====
         violation_escalated = False
 
         if action == "check_in":
-            # منع تسجيل حضور جديد إن وُجد سجل مفتوح
             open_rec = (AttendanceRecord.objects
                         .filter(employee=employee, check_out_time__isnull=True)
                         .order_by("-check_in_time").first())
@@ -1192,7 +898,6 @@ class AttendanceCheckAPIView(APIView):
                     extra={"should_monitor_location": monitoring_should_follow, "shift": shift_payload},
                 )
 
-            # منع تعدد الحضور في نفس اليوم
             today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
             today_end   = today_start + timedelta(days=1)
             if AttendanceRecord.objects.filter(
@@ -1209,7 +914,6 @@ class AttendanceCheckAPIView(APIView):
                     extra={"should_monitor_location": monitoring_should_follow, "shift": shift_payload},
                 )
 
-            # إنشاء السجل
             rec = ser.save()
             update_fields = []
             if getattr(rec, "check_type", None) != action:
@@ -1225,29 +929,14 @@ class AttendanceCheckAPIView(APIView):
                 rec.save(update_fields=update_fields)
 
             if violation_flag:
-                record_geofence_violation(
-                    employee=employee,
-                    location=location,
-                    reason=violation_reason,
-                    distance=dist,
-                    radius=radius,
-                    codes=violation_codes,
-                    outside_minutes=None,
-                    attendance_record=rec,
-                    warning_minutes=monitoring_grace_minutes,
-                    violation_rule=monitoring_rule,
-                )
-                violation_escalated = True
+                _ = _apply_geofence_salary_deduction(employee, GEOFENCE_DEDUCTION_PERCENT)  # إن أردت الخصم فورًا
+                violation_escalated = False  # الإنذار عند check_out/early حسب المدة
 
             return Response({
                 "ok": True,
                 "performed": True,
                 "action": action,
                 "detail": "✅ تم تسجيل حضورك بنجاح.",
-                "note": ("الوردية غير مقيّدة زمنيًا."
-                         if start_dt is None and end_dt is None
-                         else (f"الفترة المسموحة للحضور: {tz.localtime(start_dt).strftime('%H:%M')} → {tz.localtime(end_dt).strftime('%H:%M')}"
-                               if start_dt and end_dt else "")),
                 "record_id": str(rec.id),
                 "employee": getattr(employee, "full_name", str(employee.pk)),
                 "location_id": str(location.id) if getattr(location, "id", None) else None,
@@ -1265,7 +954,6 @@ class AttendanceCheckAPIView(APIView):
             }, status=status.HTTP_201_CREATED)
 
         if action == "check_out":
-            # منع الانصراف العادي إذا كان هناك انصراف مبكر اليوم
             today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
             today_end   = today_start + timedelta(days=1)
             if AttendanceRecord.objects.filter(
@@ -1309,30 +997,17 @@ class AttendanceCheckAPIView(APIView):
             if violation_flag and rec.check_in_time:
                 violation_outside_minutes = (now_local - rec.check_in_time).total_seconds() / 60.0
                 if violation_outside_minutes >= monitoring_grace_minutes:
-                    record_geofence_violation(
-                        employee=employee,
-                        location=rec.location or location,
-                        reason=violation_reason,
-                        distance=dist,
-                        radius=radius,
-                        codes=violation_codes,
-                        outside_minutes=violation_outside_minutes,
-                        attendance_record=rec,
-                        warning_minutes=monitoring_grace_minutes,
-                        violation_rule=monitoring_rule,
-                    )
+                    # تسجيل مخالفة
+                    _ = _apply_geofence_salary_deduction(employee, GEOFENCE_DEDUCTION_PERCENT)
                     violation_escalated = True
 
-            _purge_location_pings_for_employee(employee)
+            LocationPing.objects.filter(employee=employee, violation_triggered=False).delete()
 
             return Response({
                 "ok": True,
                 "performed": True,
                 "action": action,
                 "detail": "✅ تم تسجيل انصرافك بنجاح.",
-                "note": ("الوردية غير مقيّدة زمنيًا."
-                         if (start_dt is None and end_dt is None)
-                         else (f"يمكن الانصراف اعتبارًا من: {tz.localtime(start_dt).strftime('%H:%M')}" if start_dt else "")),
                 "record_id": str(rec.id),
                 "employee": getattr(employee, "full_name", str(employee.pk)),
                 "location_id": str(rec.location.id) if rec.location else None,
@@ -1350,7 +1025,6 @@ class AttendanceCheckAPIView(APIView):
             }, status=status.HTTP_200_OK)
 
         if action == "early_check_out":
-            # يجب وجود سجل حضور مفتوح
             rec = (AttendanceRecord.objects
                    .filter(employee=employee, check_out_time__isnull=True)
                    .order_by("-check_in_time").first())
@@ -1363,7 +1037,6 @@ class AttendanceCheckAPIView(APIView):
                     extra={"should_monitor_location": monitoring_should_follow, "shift": shift_payload},
                 )
 
-            # مرّة واحدة يوميًا
             today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
             today_end   = today_start + timedelta(days=1)
             if AttendanceRecord.objects.filter(
@@ -1412,21 +1085,10 @@ class AttendanceCheckAPIView(APIView):
             if violation_flag and rec.check_in_time:
                 violation_outside_minutes = (now_local - rec.check_in_time).total_seconds() / 60.0
                 if violation_outside_minutes >= monitoring_grace_minutes:
-                    record_geofence_violation(
-                        employee=employee,
-                        location=rec.location or location,
-                        reason=violation_reason,
-                        distance=dist,
-                        radius=radius,
-                        codes=violation_codes,
-                        outside_minutes=violation_outside_minutes,
-                        attendance_record=rec,
-                        warning_minutes=monitoring_grace_minutes,
-                        violation_rule=monitoring_rule,
-                    )
+                    _ = _apply_geofence_salary_deduction(employee, GEOFENCE_DEDUCTION_PERCENT)
                     violation_escalated = True
 
-            _purge_location_pings_for_employee(employee)
+            LocationPing.objects.filter(employee=employee, violation_triggered=False).delete()
 
             return Response({
                 "ok": True,
@@ -1437,7 +1099,7 @@ class AttendanceCheckAPIView(APIView):
                 "early_reason": reason_txt,
                 "record_id": str(rec.id),
                 "employee": getattr(employee, "full_name", str(employee.pk)),
-                "location_id": str(rec.id) if rec.location else None,
+                "location_id": str(rec.location.id) if rec.location else None,
                 "location_name": getattr(rec.location, "name", None) if rec.location else None,
                 "distance_m": round(dist, 2) if raw_dist is not None else None,
                 "location_center": {"lat": center_lat, "lng": center_lng, "radius_m": radius},
@@ -1451,7 +1113,6 @@ class AttendanceCheckAPIView(APIView):
                 "should_monitor_location": False,
             }, status=status.HTTP_200_OK)
 
-        # أي إجراء غير مدعوم
         return self._deny(
             action=action,
             detail="إجراء غير مدعوم.",
@@ -1460,13 +1121,6 @@ class AttendanceCheckAPIView(APIView):
             extra={"should_monitor_location": monitoring_should_follow, "shift": shift_payload},
         )
 
-    # ====== Helpers to wire up device-binding (replace stubs with your DB logic) ======
-    def _device_binding_enabled(self):
-        return True
-
-    def _is_device_allowed(self, user, device_hash: str):
-        # TODO: ادمج مع TrustedDevice/DeviceLoginChallenge
-        return True
 
 class ResolveLocationAPIView(APIView):
     permission_classes = [IsAuthenticated]
@@ -1495,13 +1149,16 @@ class ResolveLocationAPIView(APIView):
             radius = float(loc.gps_radius)
         except (TypeError, ValueError):
             radius = None
+
         (monitoring_payload,
          monitoring_active,
          monitoring_grace_minutes,
          monitoring_ping_seconds,
          monitoring_outside_seconds,
          monitoring_rule,
-         monitoring_config) = _monitoring_details(loc)
+         monitoring_config,
+         monitoring_pause) = _monitoring_details(loc, employee=employee)
+
         assignment, _, window_start, window_end = _assignment_window_for(
             employee=employee,
             location=loc,
@@ -1563,13 +1220,15 @@ class LocationPingAPIView(APIView):
                 center_lat, center_lng = [float(x.strip()) for x in loc.gps_coordinates.split(",", 1)]
             except Exception:
                 pass
+
         (monitoring_payload,
          monitoring_active_config,
          monitoring_grace_minutes,
          monitoring_ping_seconds,
          monitoring_outside_seconds,
          monitoring_rule,
-         monitoring_config) = _monitoring_details(loc)
+         monitoring_config,
+         monitoring_pause) = _monitoring_details(loc, employee=employee)
 
         assignment, shift_obj, window_start, window_end = _assignment_window_for(
             employee=employee,
@@ -1596,6 +1255,8 @@ class LocationPingAPIView(APIView):
             "shift_window_start": _local_iso(window_start),
             "shift_window_end": _local_iso(window_end),
         })
+
+        # تأكد من داخل نافذة الوردية بحسب إعداد شركتك (اختياري)
         start, end, unrestricted, pre_buf, post_buf = get_current_shift_window(request.user)
         now = timezone.now().astimezone(timezone.utc)
         if not unrestricted and start and end:
@@ -1603,6 +1264,7 @@ class LocationPingAPIView(APIView):
             end_buf = end + timedelta(minutes=post_buf or 0)
             if not (start_buf <= now <= end_buf):
                 return fail('خارج وقت الوردية', code='outside_shift', status=400)
+
         ping = LocationPing.objects.create(
             employee=employee,
             location=loc,
@@ -1653,18 +1315,8 @@ class LocationPingAPIView(APIView):
                     recorded_at__gte=outside_start,
                 ).exists()
                 if not existing_violation:
-                    record_geofence_violation(
-                        employee=employee,
-                        location=loc,
-                        reason=violation_reason,
-                        distance=dist,
-                        radius=radius,
-                        codes=violation_codes,
-                        outside_minutes=outside_minutes,
-                        attendance_record=active_attendance,
-                        warning_minutes=monitoring_grace_minutes,
-                        violation_rule=monitoring_rule,
-                    )
+                    # تصعيد وخصم إن لزم
+                    _ = _apply_geofence_salary_deduction(employee, GEOFENCE_DEDUCTION_PERCENT)
                     ping.violation_triggered = True
                     ping.save(update_fields=["violation_triggered"])
                     violation_triggered = True
@@ -1703,6 +1355,450 @@ class LocationPingAPIView(APIView):
         }
         return Response(data, status=status.HTTP_200_OK)
 
+
+class AttendanceLastForMeView(APIView):
+    """
+    تم تحويله إلى POST:
+    POST /api/v1/attendance/last/
+    يعيد آخر سجل للموظف الحالي. 200 مع البيانات | 204 إذا لا يوجد أي سجل
+    """
+    permission_classes = [IsAuthenticated]
+
+    @staticmethod
+    def _determine_action(record: AttendanceRecord) -> str:
+        if record.check_type:
+            return record.check_type
+        if getattr(record, "early_checkout", False):
+            return "early_check_out"
+        if record.check_out_time:
+            return "check_out"
+        return "check_in"
+
+    @staticmethod
+    def _shift_window(record: AttendanceRecord) -> tuple[Optional[dt.datetime], Optional[dt.datetime]]:
+        shift = getattr(record, "shift", None)
+        reference_dt = (
+            record.check_in_time
+            or record.timestamp
+            or record.created_at
+        )
+        if not shift or reference_dt is None:
+            return None, None
+
+        tz = dj_timezone.get_current_timezone()
+        if dj_timezone.is_naive(reference_dt):
+            reference_dt = dj_timezone.make_aware(reference_dt, tz)
+        local_ref = dj_timezone.localtime(reference_dt, timezone=tz)
+
+        start_naive = dt.datetime.combine(local_ref.date(), shift.start_time)
+        end_naive = dt.datetime.combine(local_ref.date(), shift.end_time)
+
+        start = dj_timezone.make_aware(start_naive, tz) if dj_timezone.is_naive(start_naive) else start_naive
+        end = dj_timezone.make_aware(end_naive, tz) if dj_timezone.is_naive(end_naive) else end_naive
+
+        if end <= start:
+            end = end + timedelta(days=1)
+
+        return start, end
+
+    @staticmethod
+    def _effective_local_datetime(record: AttendanceRecord) -> Optional[dt.datetime]:
+        candidates = [
+            getattr(record, "timestamp", None),
+            getattr(record, "updated_at", None),
+            getattr(record, "check_out_time", None),
+            getattr(record, "check_in_time", None),
+            getattr(record, "created_at", None),
+        ]
+        for candidate in candidates:
+            local_dt = _local_dt(candidate)
+            if local_dt:
+                return local_dt
+        return None
+
+    def _serialize_record(
+        self,
+        record: AttendanceRecord,
+        *,
+        effective_local: Optional[dt.datetime] = None,
+        now_local: Optional[dt.datetime] = None,
+    ) -> dict[str, object]:
+        base = AttendanceMiniSerializer(record).data
+        location_obj = getattr(record, "location", None)
+        employee_obj = getattr(record, "employee", None)
+
+        (monitoring_payload,
+         monitoring_active,
+         monitoring_grace_minutes,
+         monitoring_ping_seconds,
+         monitoring_outside_seconds,
+         _monitoring_rule,
+         _monitoring_config,
+         _monitoring_pause) = _monitoring_details(location_obj, employee=employee_obj)
+
+        action = self._determine_action(record)
+        recorded_at = (
+            record.timestamp
+            or record.updated_at
+            or record.check_out_time
+            or record.check_in_time
+        )
+
+        shift_start, shift_end = self._shift_window(record)
+        assignment_window = _assignment_window_for(
+            employee=employee_obj,
+            location=location_obj,
+            reference=now_local or dj_timezone.now(),
+        )
+        assignment_obj, _, window_start, window_end = assignment_window
+        if window_start is None and shift_start is not None:
+            window_start = shift_start
+        if window_end is None and shift_end is not None:
+            window_end = shift_end
+
+        shift_start_local = _local_dt(window_start) if window_start else None
+        shift_end_local = _local_dt(window_end) if window_end else None
+
+        recorded_at_local = _local_dt(recorded_at)
+        recorded_at_iso = recorded_at_local.isoformat() if recorded_at_local else None
+        timestamp_iso = _local_iso(record.timestamp) if record.timestamp else None
+        shift_start_iso = shift_start_local.isoformat() if shift_start_local else None
+        shift_end_iso = shift_end_local.isoformat() if shift_end_local else None
+
+        effective_local = effective_local or self._effective_local_datetime(record)
+        now_local = now_local or _local_dt(dj_timezone.now())
+        is_today = (
+            bool(effective_local and now_local)
+            and effective_local.date() == now_local.date()
+        )
+        within_shift = True
+        if shift_start_local and shift_end_local and now_local:
+            within_shift = shift_start_local <= now_local <= shift_end_local
+        monitoring_payload = dict(monitoring_payload or {})
+        monitoring_payload.update({
+            "within_shift_window": within_shift,
+            "shift_window_start": shift_start_iso,
+            "shift_window_end": shift_end_iso,
+        })
+        should_monitor = bool(
+            monitoring_active
+            and getattr(record, "check_out_time", None) is None
+            and within_shift
+        )
+        next_ping_seconds = None
+        if should_monitor:
+            base_next = monitoring_ping_seconds
+            outside_next = monitoring_outside_seconds or monitoring_ping_seconds
+            candidate = base_next if within_shift else outside_next
+            if candidate and candidate > 0:
+                next_ping_seconds = candidate
+
+        payload: dict[str, object] = {
+            "ok": True,
+            "detail": f"آخر تسجيل: {'الحضور' if action=='check_in' else ('الانصراف' if action=='check_out' else 'الانصراف المبكر')}.",
+            "message": f"آخر تسجيل: {action}.",
+            "record_id": str(record.id),
+            "action": action,
+            "attendance_action": action,
+            "type": action,
+            "recorded_at": recorded_at_iso,
+            "timestamp": timestamp_iso,
+            "note": record.notes,
+            "notes": record.notes,
+            "biometric_verified": record.biometric_verified,
+            "biometric_method": record.biometric_method,
+            "biometric_attempts": record.biometric_attempts,
+            "unrestricted": shift_start is None and shift_end is None,
+            "shift_window_start": shift_start_iso,
+            "shift_window_end": shift_end_iso,
+            "effective_recorded_at": effective_local.isoformat() if effective_local else recorded_at_iso,
+            "is_today": is_today,
+            "within_shift": within_shift,
+            "should_monitor_location": should_monitor,
+            "violation": record.is_violation,
+            "violation_warning_minutes": monitoring_grace_minutes,
+            "monitoring": monitoring_payload,
+            "next_ping_seconds": next_ping_seconds,
+        }
+
+        shift_payload = _build_shift_payload(
+            employee=employee_obj,
+            shift=getattr(record, "shift", None),
+            assignment=None,
+            allowed_start=shift_start,
+            allowed_end=shift_end,
+            location=location_obj,
+            within_shift=within_shift,
+        )
+        if shift_payload:
+            payload["shift"] = shift_payload
+
+        if employee_obj:
+            payload["employee"] = getattr(employee_obj, "full_name", None)
+            payload.setdefault("employee_id", str(employee_obj.id))
+
+        if location_obj:
+            payload["location"] = getattr(location_obj, "name", None)
+            payload["location_name"] = getattr(location_obj, "name", None)
+            client_name = getattr(location_obj, "client_name", None)
+            if client_name:
+                payload["client_name"] = client_name
+            location_id = getattr(location_obj, "id", None)
+            if location_id is not None:
+                payload["location_id"] = str(location_id)
+
+        last_ping = (
+            LocationPing.objects
+            .filter(employee=employee_obj)
+            .order_by("-recorded_at")
+            .first()
+            if employee_obj
+            else None
+        )
+        if last_ping:
+            last_ping_local = _local_dt(last_ping.recorded_at)
+            payload["last_location_ping"] = {
+                "recorded_at": last_ping.recorded_at.isoformat(),
+                "recorded_at_local": last_ping_local.isoformat() if last_ping_local else None,
+                "latitude": last_ping.latitude,
+                "longitude": last_ping.longitude,
+                "accuracy": last_ping.accuracy,
+                "distance_m": last_ping.distance_m,
+                "within_radius": last_ping.within_radius,
+                "violation_triggered": last_ping.violation_triggered,
+                "is_today": (
+                    last_ping_local.date() == now_local.date()
+                    if last_ping_local and now_local
+                    else None
+                ),
+            }
+
+        combined = dict(base)
+        combined.update(payload)
+        return combined
+
+    def post(self, request):
+        try:
+            emp = Employee.objects.get(user=request.user)
+        except Employee.DoesNotExist:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        rec = (AttendanceRecord.objects
+               .filter(employee=emp)
+               .select_related("location")
+               .order_by("-updated_at", "-id")
+               .first())
+
+        if not rec:
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
+        effective_local = self._effective_local_datetime(rec)
+        now_local = _local_dt(dj_timezone.now())
+        shift_start, shift_end = self._shift_window(rec)
+        shift_payload = _build_shift_payload(
+            employee=emp,
+            shift=getattr(rec, "shift", None),
+            assignment=None,
+            allowed_start=shift_start,
+            allowed_end=shift_end,
+            location=getattr(rec, "location", None),
+            within_shift=None,
+        )
+        if not effective_local or (now_local and effective_local.date() != now_local.date()):
+            return Response(
+                {
+                    "ok": False,
+                    "detail": "لا يوجد سجل حضور لهذا اليوم.",
+                    "message": "لا يوجد سجل حضور لهذا اليوم.",
+                    "latest_record_id": str(rec.id),
+                    "latest_record_action": self._determine_action(rec),
+                    "latest_recorded_at": effective_local.isoformat() if effective_local else _local_iso(rec.timestamp),
+                    "shift": shift_payload,
+                },
+                status=status.HTTP_200_OK,
+            )
+
+        data = self._serialize_record(rec, effective_local=effective_local, now_local=now_local)
+        return Response(data, status=status.HTTP_200_OK)
+
+
+class AttendanceExistsView(APIView):
+    """
+    تم تحويله إلى POST:
+    POST /api/v1/attendance/exists/  مع body: {"id": "<uuid|string>"}
+    200: {"exists": true|false}
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        pk = (request.data.get("id") or request.data.get("pk") or request.data.get("attendance_id") or "").strip()
+        exists = AttendanceRecord.objects.filter(id=pk).exists() if pk else False
+        return Response({"exists": bool(exists)}, status=status.HTTP_200_OK)
+
+
+# =============== التقارير والطلبات والسلف (POST-only لقوائم) ===============
+
+class GuardReportListCreateView(OptimizedQuerysetMixin, APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        """
+        - إن كان body يحتوي حقول إنشاء -> إنشاء تقرير
+        - إن كان body فارغ أو فيه {list:true} -> إرجاع قائمة تقاريري
+        """
+        employee = _require_guard_employee(request.user)
+        is_list = (request.data.get("list") is True) or (not request.data) or (request.data.get("action") == "list")
+        if is_list:
+            qs = (Report.objects
+                  .filter(employee=employee)
+                  .select_related("location")
+                  .prefetch_related("attachments")
+                  .order_by("-created_at"))
+            data = ReportSerializer(qs, many=True).data
+            return Response({"results": data}, status=status.HTTP_200_OK)
+
+        ser = ReportSerializer(data=request.data, context={"request": request})
+        ser.is_valid(raise_exception=True)
+        with transaction.atomic():
+            ser.save(employee=employee)
+        return Response(ser.data, status=status.HTTP_201_CREATED)
+
+
+class GuardRequestListCreateView(OptimizedQuerysetMixin, APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        """
+        POST-only للائحة/إنشاء الطلبات
+        """
+        employee = _require_guard_employee(request.user)
+        is_list = (request.data.get("list") is True) or (not request.data) or (request.data.get("action") == "list")
+        if is_list:
+            qs = (Request.objects
+                  .filter(employee=employee)
+                  .select_related("approver")
+                  .order_by("-created_at"))
+            data = RequestSerializer(qs, many=True).data
+            return Response({"results": data}, status=status.HTTP_200_OK)
+
+        ser = RequestSerializer(data=request.data, context={"request": request})
+        ser.is_valid(raise_exception=True)
+        ser.save(employee=employee)
+        return Response(ser.data, status=status.HTTP_201_CREATED)
+
+
+class GuardAdvanceListCreateView(OptimizedQuerysetMixin, APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        """
+        POST-only للائحة/إنشاء السلف
+        """
+        employee = _require_guard_employee(request.user)
+        is_list = (request.data.get("list") is True) or (not request.data) or (request.data.get("action") == "list")
+        if is_list:
+            qs = Advance.objects.filter(employee=employee).order_by("-requested_at")
+            data = AdvanceSerializer(qs, many=True).data
+            return Response({"results": data}, status=status.HTTP_200_OK)
+
+        ctx = {"request": request, "employee": employee}
+        ser = AdvanceSerializer(data=request.data, context=ctx)
+        ser.is_valid(raise_exception=True)
+        ser.save(employee=employee)
+        return Response(ser.data, status=status.HTTP_201_CREATED)
+
+
+# =============== المهام (POST-only) ===============
+
+class GuardTaskListView(OptimizedQuerysetMixin, APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        """
+        POST-only لجلب المهام. فلتر الحالة يمكن تمريره في body: {"status": "..."} أو {"status": "active"}
+        """
+        employee = _require_guard_employee(request.user)
+        status_filter = (request.data.get('status') or '').strip().lower()
+        qs = Task.objects.filter(assigned_to=employee).select_related('location').order_by('-due_date', '-created_at')
+        if status_filter:
+            if status_filter == 'active':
+                qs = qs.exclude(status='completed')
+            elif status_filter in {choice[0] for choice in Task.STATUS_CHOICES}:
+                qs = qs.filter(status=status_filter)
+        data = TaskMiniSerializer(qs, many=True).data
+        return Response({"results": data}, status=status.HTTP_200_OK)
+
+
+class GuardTaskUpdateView(OptimizedQuerysetMixin, APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        """
+        تحويل PATCH -> POST لتحديث حالة مهمة
+        body: {"status": "...", "status_note": "..."}
+        """
+        employee = _require_guard_employee(request.user)
+        try:
+            task = Task.objects.select_related('location').get(id=pk, assigned_to=employee)
+        except Task.DoesNotExist as exc:
+            raise NotFound("لم يتم العثور على المهمة") from exc
+
+        serializer = GuardTaskUpdateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        new_status = serializer.validated_data['status']
+        status_note = serializer.validated_data.get('status_note') or ''
+
+        if new_status not in TASK_STATUS_FLOW:
+            return Response({"detail": "الحالة الجديدة غير مدعومة."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            current_index = TASK_STATUS_FLOW.index(task.status)
+            target_index = TASK_STATUS_FLOW.index(new_status)
+        except ValueError:
+            return Response({"detail": "لا يمكن تحديث هذه المهمة."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if target_index < current_index:
+            return Response({"detail": "لا يمكن الرجوع إلى حالة سابقة."}, status=status.HTTP_400_BAD_REQUEST)
+
+        if target_index > current_index + 1:
+            return Response({"detail": "يجب تحديث حالة المهمة بالتسلسل."}, status=status.HTTP_400_BAD_REQUEST)
+
+        updated_fields = []
+        if task.status != new_status:
+            task.status = new_status
+            updated_fields.append('status')
+
+        if status_note != (task.status_note or ''):
+            task.status_note = status_note
+            updated_fields.append('status_note')
+
+        if updated_fields:
+            updated_fields.append('updated_at')
+            task.save(update_fields=updated_fields)
+
+        return Response(TaskMiniSerializer(task).data, status=status.HTTP_200_OK)
+
+
+# =============== الزي (POST-only للقائمة) ===============
+
+class GuardUniformItemListView(OptimizedQuerysetMixin, APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        _require_guard_employee(request.user)
+        items = UniformItem.objects.order_by('name')
+        data = [
+            {
+                'id': str(item.id),
+                'name': item.name,
+                'price': str(item.price),
+            }
+            for item in items
+        ]
+        return Response({'results': data}, status=status.HTTP_200_OK)
+
+
+# =============== شاشات المراقبة (Admin) ===============
 
 @staff_member_required
 def location_dashboard_view(request):
@@ -1798,464 +1894,3 @@ def location_dashboard_feed(request):
         "now": now_local.isoformat() if now_local else now.isoformat(),
         "results": results,
     })
-
-
-# TIP: consider using select_related/prefetch_related on queryset for performance.
-class GuardReportListCreateView(OptimizedQuerysetMixin, generics.ListCreateAPIView):
-    permission_classes = [IsAuthenticated]
-    serializer_class = ReportSerializer
-
-    def get_queryset(self):
-        employee = _require_guard_employee(self.request.user)
-        return (
-            Report.objects
-            .filter(employee=employee)
-            .select_related("location")
-            .prefetch_related("attachments")
-            .order_by("-created_at")
-        )
-
-    def perform_create(self, serializer):
-        employee = _require_guard_employee(self.request.user)
-        with transaction.atomic():
-            serializer.save(employee=employee)
-
-
-# TIP: consider using select_related/prefetch_related on queryset for performance.
-class GuardRequestListCreateView(OptimizedQuerysetMixin, generics.ListCreateAPIView):
-    permission_classes = [IsAuthenticated]
-    serializer_class = RequestSerializer
-
-    def get_queryset(self):
-        employee = _require_guard_employee(self.request.user)
-        return (
-            Request.objects
-            .filter(employee=employee)
-            .select_related("approver")
-            .order_by("-created_at")
-        )
-
-    def perform_create(self, serializer):
-        employee = _require_guard_employee(self.request.user)
-        serializer.save(employee=employee)
-
-
-class GuardAdvanceListCreateView(OptimizedQuerysetMixin, generics.ListCreateAPIView):
-    permission_classes = [IsAuthenticated]
-    serializer_class = AdvanceSerializer
-
-    def get_queryset(self):
-        employee = _require_guard_employee(self.request.user)
-        return (
-            Advance.objects
-            .filter(employee=employee)
-            .order_by("-requested_at")
-        )
-
-    def get_serializer_context(self):
-        context = super().get_serializer_context()
-        try:
-            context["employee"] = _require_guard_employee(self.request.user)
-        except Exception:
-            pass
-        return context
-
-    def perform_create(self, serializer):
-        employee = self.get_serializer_context().get("employee") or _require_guard_employee(self.request.user)
-        serializer.save(employee=employee)
-
-
-# TIP: consider using select_related/prefetch_related on queryset for performance.
-class GuardTaskListView(OptimizedQuerysetMixin, generics.ListAPIView):
-    permission_classes = [IsAuthenticated]
-    serializer_class = TaskMiniSerializer
-
-    def get_queryset(self):
-        employee = _require_guard_employee(self.request.user)
-        qs = Task.objects.filter(assigned_to=employee).select_related('location').order_by('-due_date', '-created_at')
-        status_filter = (self.request.query_params.get('status') or '').strip().lower()
-        if status_filter:
-            if status_filter == 'active':
-                qs = qs.exclude(status='completed')
-            elif status_filter in {choice[0] for choice in Task.STATUS_CHOICES}:
-                qs = qs.filter(status=status_filter)
-        return qs
-
-
-class GuardTaskUpdateView(OptimizedQuerysetMixin, APIView):
-    permission_classes = [IsAuthenticated]
-
-    def patch(self, request, pk):
-        employee = _require_guard_employee(request.user)
-        try:
-            task = Task.objects.select_related('location').get(id=pk, assigned_to=employee)
-        except Task.DoesNotExist as exc:
-            raise NotFound("لم يتم العثور على المهمة") from exc
-
-        serializer = GuardTaskUpdateSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        new_status = serializer.validated_data['status']
-        status_note = serializer.validated_data.get('status_note') or ''
-
-        if new_status not in TASK_STATUS_FLOW:
-            return Response({"detail": "الحالة الجديدة غير مدعومة."}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            current_index = TASK_STATUS_FLOW.index(task.status)
-            target_index = TASK_STATUS_FLOW.index(new_status)
-        except ValueError:
-            return Response({"detail": "لا يمكن تحديث هذه المهمة."}, status=status.HTTP_400_BAD_REQUEST)
-
-        if target_index < current_index:
-            return Response({"detail": "لا يمكن الرجوع إلى حالة سابقة."}, status=status.HTTP_400_BAD_REQUEST)
-
-        if target_index > current_index + 1:
-            return Response({"detail": "يجب تحديث حالة المهمة بالتسلسل."}, status=status.HTTP_400_BAD_REQUEST)
-
-        updated_fields = []
-        if task.status != new_status:
-            task.status = new_status
-            updated_fields.append('status')
-
-        if status_note != (task.status_note or ''):
-            task.status_note = status_note
-            updated_fields.append('status_note')
-
-        if updated_fields:
-            updated_fields.append('updated_at')
-            task.save(update_fields=updated_fields)
-
-        return Response(TaskMiniSerializer(task).data, status=status.HTTP_200_OK)
-
-
-class GuardUniformItemListView(OptimizedQuerysetMixin, APIView):
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        _require_guard_employee(request.user)
-        items = UniformItem.objects.order_by('name')
-        data = [
-            {
-                'id': str(item.id),
-                'name': item.name,
-                'price': str(item.price),
-            }
-            for item in items
-        ]
-        return Response({'results': data}, status=status.HTTP_200_OK)
-
-
-
-class AttendanceLastForMeView(APIView):
-    """
-    GET /api/v1/attendance/last/
-    يعيد آخر سجل حضور/انصراف للموظف الحالي (حسب التوكن).
-    200 مع البيانات | 204 إذا لا يوجد أي سجل
-    """
-    permission_classes = [IsAuthenticated]
-
-    @staticmethod
-    def _determine_action(record: AttendanceRecord) -> str:
-        """
-        يحاول تحديد آخر إجراء اعتمادًا على الحقول المتاحة لضمان توافق البيانات مع الواجهة.
-        """
-        if record.check_type:
-            return record.check_type
-        if record.early_checkout:
-            return "early_check_out"
-        if record.check_out_time:
-            return "check_out"
-        return "check_in"
-
-    @staticmethod
-    def _shift_window(record: AttendanceRecord) -> tuple[Optional[dt.datetime], Optional[dt.datetime]]:
-        """
-        يحسب نافذة الوردية (إن وُجدت) باستخدام تاريخ وقت الحضور لضمان تمثيل صحيح بالتوقيت المحلي.
-        """
-        shift = getattr(record, "shift", None)
-        reference_dt = (
-            record.check_in_time
-            or record.timestamp
-            or record.created_at
-        )
-        if not shift or reference_dt is None:
-            return None, None
-
-        tz = dj_timezone.get_current_timezone()
-        if dj_timezone.is_naive(reference_dt):
-            reference_dt = dj_timezone.make_aware(reference_dt, tz)
-        local_ref = dj_timezone.localtime(reference_dt, timezone=tz)
-
-        start_naive = dt.datetime.combine(local_ref.date(), shift.start_time)
-        end_naive = dt.datetime.combine(local_ref.date(), shift.end_time)
-
-        start = dj_timezone.make_aware(start_naive, tz) if dj_timezone.is_naive(start_naive) else start_naive
-        end = dj_timezone.make_aware(end_naive, tz) if dj_timezone.is_naive(end_naive) else end_naive
-
-        if end <= start:
-            end = end + timedelta(days=1)
-
-        return start, end
-
-    @staticmethod
-    def _effective_local_datetime(record: AttendanceRecord) -> Optional[dt.datetime]:
-        """
-        يحدد أفضل طابع زمني محلي لآخر إجراء مرتبط بالسجل.
-        """
-        candidates = [
-            getattr(record, "timestamp", None),
-            getattr(record, "updated_at", None),
-            getattr(record, "check_out_time", None),
-            getattr(record, "check_in_time", None),
-            getattr(record, "created_at", None),
-        ]
-        for candidate in candidates:
-            local_dt = _local_dt(candidate)
-            if local_dt:
-                return local_dt
-        return None
-
-    def _serialize_record(
-        self,
-        record: AttendanceRecord,
-        *,
-        effective_local: Optional[dt.datetime] = None,
-        now_local: Optional[dt.datetime] = None,
-    ) -> dict[str, object]:
-        """
-        يثري بيانات السجل الأخير لتتضمن مفاتيح مفهومة لتطبيق الهاتف.
-        """
-        base = AttendanceMiniSerializer(record).data
-        location_obj = getattr(record, "location", None)
-        employee_obj = getattr(record, "employee", None)
-
-        (monitoring_payload,
-         monitoring_active,
-         monitoring_grace_minutes,
-         monitoring_ping_seconds,
-         monitoring_outside_seconds,
-         monitoring_rule,
-         monitoring_config) = _monitoring_details(location_obj)
-
-        action = self._determine_action(record)
-        recorded_at = (
-            record.timestamp
-            or record.updated_at
-            or record.check_out_time
-            or record.check_in_time
-        )
-
-        shift_start, shift_end = self._shift_window(record)
-        assignment_window = _assignment_window_for(
-            employee=employee_obj,
-            location=location_obj,
-            reference=now_local or dj_timezone.now(),
-        )
-        assignment_obj, _, window_start, window_end = assignment_window
-        if window_start is None and shift_start is not None:
-            window_start = shift_start
-        if window_end is None and shift_end is not None:
-            window_end = shift_end
-
-        shift_start_local = _local_dt(window_start) if window_start else None
-        shift_end_local = _local_dt(window_end) if window_end else None
-
-        action_labels = {
-            "check_in": "الحضور",
-            "check_out": "الانصراف",
-            "early_check_out": "الانصراف المبكر",
-        }
-        action_label = action_labels.get(action, action)
-        detail_msg = f"آخر تسجيل: {action_label}."
-
-        recorded_at_local = _local_dt(recorded_at)
-        recorded_at_iso = recorded_at_local.isoformat() if recorded_at_local else None
-        timestamp_iso = _local_iso(record.timestamp) if record.timestamp else None
-        shift_start_iso = shift_start_local.isoformat() if shift_start_local else None
-        shift_end_iso = shift_end_local.isoformat() if shift_end_local else None
-
-        effective_local = effective_local or self._effective_local_datetime(record)
-        now_local = now_local or _local_dt(dj_timezone.now())
-        is_today = (
-            bool(effective_local and now_local)
-            and effective_local.date() == now_local.date()
-        )
-        within_shift = True
-        if shift_start_local and shift_end_local and now_local:
-            within_shift = shift_start_local <= now_local <= shift_end_local
-        elif shift_start_local or shift_end_local:
-            within_shift = True
-        else:
-            within_shift = True
-        monitoring_payload = dict(monitoring_payload or {})
-        monitoring_payload.update({
-            "within_shift_window": within_shift,
-            "shift_window_start": shift_start_iso,
-            "shift_window_end": shift_end_iso,
-        })
-        should_monitor = bool(
-            monitoring_active
-            and getattr(record, "check_out_time", None) is None
-            and within_shift
-        )
-        next_ping_seconds = None
-        if should_monitor:
-            base_next = monitoring_ping_seconds
-            outside_next = monitoring_outside_seconds or monitoring_ping_seconds
-            candidate = base_next if within_shift else outside_next
-            if candidate and candidate > 0:
-                next_ping_seconds = candidate
-
-        payload: dict[str, object] = {
-            "ok": True,
-            "detail": detail_msg,
-            "message": detail_msg,
-            "record_id": str(record.id),
-            "action": action,
-            "attendance_action": action,
-            "type": action,
-            "recorded_at": recorded_at_iso,
-            "timestamp": timestamp_iso,
-            "note": record.notes,
-            "notes": record.notes,
-            "biometric_verified": record.biometric_verified,
-            "biometric_method": record.biometric_method,
-            "biometric_attempts": record.biometric_attempts,
-            "unrestricted": shift_start is None and shift_end is None,
-            "shift_window_start": shift_start_iso,
-            "shift_window_end": shift_end_iso,
-            "effective_recorded_at": effective_local.isoformat() if effective_local else recorded_at_iso,
-            "is_today": is_today,
-            "within_shift": within_shift,
-            "should_monitor_location": should_monitor,
-            "violation": record.is_violation,
-            "violation_warning_minutes": monitoring_grace_minutes,
-            "monitoring": monitoring_payload,
-            "next_ping_seconds": next_ping_seconds,
-        }
-
-        shift_payload = _build_shift_payload(
-            employee=employee_obj,
-            shift=getattr(record, "shift", None),
-            assignment=None,
-            allowed_start=shift_start,
-            allowed_end=shift_end,
-            location=location_obj,
-            within_shift=within_shift,
-        )
-        if shift_payload:
-            payload["shift"] = shift_payload
-
-        # معلومات إضافية عن الموظف والموقع إن توفرت
-        if employee_obj:
-            payload["employee"] = getattr(employee_obj, "full_name", None)
-            payload.setdefault("employee_id", str(employee_obj.id))
-
-        if location_obj:
-            payload["location"] = getattr(location_obj, "name", None)
-            payload["location_name"] = getattr(location_obj, "name", None)
-            client_name = getattr(location_obj, "client_name", None)
-            if client_name:
-                payload["client_name"] = client_name
-            location_id = getattr(location_obj, "id", None)
-            if location_id is not None:
-                payload["location_id"] = str(location_id)
-
-        last_ping = (
-            LocationPing.objects
-            .filter(employee=employee_obj)
-            .order_by("-recorded_at")
-            .first()
-            if employee_obj
-            else None
-        )
-        if last_ping:
-            last_ping_local = _local_dt(last_ping.recorded_at)
-            payload["last_location_ping"] = {
-                "recorded_at": last_ping.recorded_at.isoformat(),
-                "recorded_at_local": last_ping_local.isoformat() if last_ping_local else None,
-                "latitude": last_ping.latitude,
-                "longitude": last_ping.longitude,
-                "accuracy": last_ping.accuracy,
-                "distance_m": last_ping.distance_m,
-                "within_radius": last_ping.within_radius,
-                "violation_triggered": last_ping.violation_triggered,
-                "is_today": (
-                    last_ping_local.date() == now_local.date()
-                    if last_ping_local and now_local
-                    else None
-                ),
-            }
-
-        combined = dict(base)
-        combined.update(payload)
-        return combined
-
-    def get(self, request):
-        # جلب الموظف المرتبط بالمستخدم الحالي
-        try:
-            emp = Employee.objects.get(user=request.user)
-        except Employee.DoesNotExist:
-            return Response(status=status.HTTP_404_NOT_FOUND)
-
-        rec = (AttendanceRecord.objects
-               .filter(employee=emp)
-               .select_related("location")
-               .order_by("-updated_at", "-id")
-               .first())
-
-        if not rec:
-            return Response(status=status.HTTP_204_NO_CONTENT)
-
-        (monitoring_payload_raw,
-         _monitoring_active_raw,
-         monitoring_grace_minutes_raw,
-         monitoring_ping_seconds_raw,
-         monitoring_outside_seconds_raw,
-         _monitoring_rule_raw,
-         _monitoring_config_raw) = _monitoring_details(getattr(rec, "location", None))
-
-        effective_local = self._effective_local_datetime(rec)
-        now_local = _local_dt(dj_timezone.now())
-        shift_start, shift_end = self._shift_window(rec)
-        shift_payload = _build_shift_payload(
-            employee=emp,
-            shift=getattr(rec, "shift", None),
-            assignment=None,
-            allowed_start=shift_start,
-            allowed_end=shift_end,
-            location=getattr(rec, "location", None),
-            within_shift=None,
-        )
-        if not effective_local or (now_local and effective_local.date() != now_local.date()):
-            return Response(
-                {
-                    "ok": False,
-                    "detail": "لا يوجد سجل حضور لهذا اليوم.",
-                    "message": "لا يوجد سجل حضور لهذا اليوم.",
-                    "latest_record_id": str(rec.id),
-                    "latest_record_action": self._determine_action(rec),
-                    "latest_recorded_at": effective_local.isoformat() if effective_local else _local_iso(rec.timestamp),
-                    "monitoring": monitoring_payload_raw,
-                    "violation_warning_minutes": monitoring_grace_minutes_raw,
-                    "next_ping_seconds": monitoring_ping_seconds_raw,
-                    "shift": shift_payload,
-                },
-                status=status.HTTP_200_OK,
-            )
-
-        data = self._serialize_record(rec, effective_local=effective_local, now_local=now_local)
-        return Response(data, status=status.HTTP_200_OK)
-
-
-class AttendanceExistsView(APIView):
-    """
-    GET /api/v1/attendance/exists/<uuid:pk>/
-    204: موجود
-    404: غير موجود (محذوف/غير صحيح)
-    """
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request, pk):
-        exists = AttendanceRecord.objects.filter(id=pk).exists()
-        return Response(status=status.HTTP_204_NO_CONTENT if exists else status.HTTP_404_NOT_FOUND)
