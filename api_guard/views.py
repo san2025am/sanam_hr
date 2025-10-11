@@ -9,6 +9,9 @@ from datetime import timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Optional, Sequence
 
+from rest_framework.parsers import JSONParser, FormParser, MultiPartParser
+from rest_framework.decorators import parser_classes
+
 from django.conf import settings
 from django.core.mail import send_mail
 from django.db import IntegrityError, DatabaseError, transaction
@@ -646,6 +649,17 @@ class GuardMeView(APIView):
 
 class AttendanceCheckAPIView(APIView):
     permission_classes = [IsAuthenticated]
+    parser_classes = (JSONParser, FormParser, MultiPartParser) 
+
+    def _safe_data(self, request):
+        data = request.data
+        if (not data) and request.content_type and request.content_type.startswith('text/plain'):
+            import json
+            try:
+                data = json.loads(request.body.decode('utf-8'))
+            except Exception:
+                data = {}
+        return data
 
     def _deny(self, *, action, detail, reason_code,
               start=None, end=None, now=None, extra=None, monitoring=None):
@@ -675,9 +689,10 @@ class AttendanceCheckAPIView(APIView):
         return True
 
     def _early_payload_validation(self, request):
-        data = request.data
+        # قراءة آمنة (تسمح بمحاولة فك JSON إذا وصل content-type=text/plain)
+        data = getattr(self, "_safe_data", lambda r: r.data)(request)
 
-        # action
+        # ===== action =====
         normalized_action = _normalize_action_incoming(data.get("action"))
         if normalized_action is None:
             return Response({
@@ -688,7 +703,8 @@ class AttendanceCheckAPIView(APIView):
             }, status=status.HTTP_200_OK)
 
         # ===== location_id (قبول نص/رقم + رسائل أوضح) =====
-        raw_loc = (data.get("location_id") or data.get("location") or "").strip() if isinstance(data.get("location_id") or data.get("location"), str) else (data.get("location_id") or data.get("location"))
+        raw_loc_field = data.get("location_id") or data.get("location")
+        raw_loc = raw_loc_field.strip() if isinstance(raw_loc_field, str) else raw_loc_field
         location = None
         if raw_loc not in (None, "", 0, "0"):
             # جرّب مباشرة بالـ pk كما هو (يدعم نص/رقم)
@@ -711,9 +727,26 @@ class AttendanceCheckAPIView(APIView):
                 extra={"got": (raw_loc if raw_loc not in (None, "", 0, "0") else None)}
             )
 
-        # biometric (قبول مفاتيح قديمة/جديدة)
-        bio_ok = bool(data.get("bio_ok") or data.get("biometric_verified"))
-        bio_method = (data.get("bio_method") or data.get("biometric_method") or "").lower().strip()
+        # ===== biometric (قبول مفاتيح قديمة/جديدة + تطبيع) =====
+        raw_ok = data.get("bio_ok")
+        raw_ok2 = data.get("biometric_verified")
+        bio_ok = bool(raw_ok if raw_ok is not None else raw_ok2)
+
+        raw_method = (data.get("bio_method") or data.get("biometric_method") or "")
+        bio_method = (str(raw_method).lower().strip())
+
+        # alias mapping لأسماء شائعة
+        alias = {
+            "faceid": "face", "face_id": "face", "facial": "face",
+            "touchid": "fingerprint", "touch_id": "fingerprint", "fp": "fingerprint",
+            "code": "pin", "passcode": "pin", "password": "pin"
+        }
+        bio_method = alias.get(bio_method, bio_method)
+
+        # fallback آمن: إن التحقق ناجح والطريقة فارغة، اعتبرها PIN
+        if bio_ok and bio_method == "":
+            bio_method = "pin"
+
         if not bio_ok:
             return Response({
                 "ok": False,
@@ -721,15 +754,16 @@ class AttendanceCheckAPIView(APIView):
                 "detail": "التحقق البيومتري فشل، لا يمكن تنفيذ العملية.",
                 "reason_code": "BIO_FAIL",
             }, status=status.HTTP_403_FORBIDDEN)
+
         if bio_method not in ("fingerprint", "face", "pin"):
             return self._deny(
                 action=normalized_action,
                 detail="طريقة البصمة غير معروفة",
                 reason_code="BIO_METHOD_UNKNOWN",
-                extra={"accepted": ["fingerprint","face","pin"], "got": bio_method or None},
+                extra={"accepted": ["fingerprint", "face", "pin"], "got": bio_method or None},
             )
 
-        # GPS
+        # ===== GPS =====
         try:
             acc = float(data.get("accuracy") or 0.0)
             float(data.get("lat"))
@@ -737,18 +771,28 @@ class AttendanceCheckAPIView(APIView):
         except Exception:
             return self._deny(action=normalized_action, detail="إحداثيات غير صحيحة", reason_code="INVALID_COORDINATES")
         if acc > 100.0:
-            return self._deny(action=normalized_action, detail="دقة GPS منخفضة", reason_code="GPS_ACCURACY_LOW",
-                              extra={"min_required": 100, "accuracy": acc})
+            return self._deny(
+                action=normalized_action,
+                detail="دقة GPS منخفضة",
+                reason_code="GPS_ACCURACY_LOW",
+                extra={"min_required": 100, "accuracy": acc}
+            )
 
-        # Device bind (اختياري)
+        # ===== Device bind (اختياري) =====
         device_hash = request.headers.get("X-Device-Hash") or data.get("device_hash")
         if self._device_binding_enabled():
             if not device_hash or not self._is_device_allowed(request.user, device_hash):
-                return self._deny(action=normalized_action, detail="جهاز غير موثّق", reason_code="DEVICE_NOT_TRUSTED")
+                return self._deny(
+                    action=normalized_action,
+                    detail="جهاز غير موثّق",
+                    reason_code="DEVICE_NOT_TRUSTED"
+                )
 
         # خزّن الموقع المحلول في request للخطوات اللاحقة لتفادي إعادة الجلب
         request._resolved_location = location
+
         return None
+
 
     def _enforce_shift_and_location(self, request):
         data = request.data
