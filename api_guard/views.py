@@ -5,6 +5,7 @@ import hashlib
 import secrets
 import logging
 from datetime import timedelta
+from django.utils import timezone as tz
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from api_guard.utils.maps import get_current_shift_window, is_location_allowed_for_user
@@ -92,6 +93,31 @@ except (InvalidOperation, TypeError, ValueError):
     GEOFENCE_DEDUCTION_PERCENT = Decimal("2")
 if GEOFENCE_DEDUCTION_PERCENT < 0:
     GEOFENCE_DEDUCTION_PERCENT = Decimal("0")
+
+def _local_iso(dt):
+    if not dt:
+        return None
+    try:
+        return tz.localtime(dt).isoformat()
+    except Exception:
+        return dt.isoformat() if hasattr(dt, "isoformat") else str(dt)
+
+def _normalize_action_incoming(raw):
+    """
+    يطبع أي صيغة واردة إلى صيغة داخلية موحّدة:
+      check_in | check_out | early_check_out
+    أمثلة مدعومة: checkin / check-in / check_in / signin / checkout / check-out / check_out / signout / early*...
+    """
+    if not raw:
+        return None
+    s = str(raw).strip().lower().replace("-", "_").replace(" ", "_")
+    if s in ("checkin", "sign_in", "signin", "check_in"):
+        return "check_in"
+    if s in ("checkout", "sign_out", "signout", "check_out"):
+        return "check_out"
+    if s in ("early_checkout", "early_check_out", "early_signout", "early_sign_out"):
+        return "early_check_out"
+    return None
 
 
 def _decimal_or_zero(value) -> Decimal:
@@ -880,11 +906,14 @@ class GuardMeView(APIView):
 # Attendance
 # =========================
 
+
+
 class AttendanceCheckAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def _deny(self, *, action, detail, reason_code,
               start=None, end=None, now=None, extra=None, monitoring=None):
+        """رفض منطق الأعمال مع status=200 ورسالة واضحة قابلة للعرض في التطبيق."""
         payload = {
             "ok": False,
             "performed": False,
@@ -893,50 +922,71 @@ class AttendanceCheckAPIView(APIView):
             "reason_code": reason_code,
         }
         wnd = {}
-        if start is not None: wnd["from"] = start
-        if end   is not None: wnd["to"]   = end
-        if now   is not None: wnd["now"]  = now
+        if start is not None: wnd["from"] = _local_iso(start)
+        if end   is not None: wnd["to"]   = _local_iso(end)
+        if now   is not None: wnd["now"]  = _local_iso(now)
         if wnd: payload["window"] = wnd
         if extra: payload.update(extra)
         if monitoring is not None:
             payload["monitoring"] = monitoring
         return Response(payload, status=status.HTTP_200_OK)
 
-    def post(self, request):
-        # Enforce shift window & location
+    def _enforce_shift_and_location(self, request):
+        """
+        يعيد (None, None) لو كل شيء سليم.
+        يعيد (Response, normalized_action) إن كان هناك رفض (fail) مبكر.
+        """
+        # تطبيع action مبكرًا
+        normalized_action = _normalize_action_incoming(request.data.get("action"))
+        if normalized_action is None:
+            return fail("Invalid action", code="bad_action", status=400), None
+
+        # نافذة الوردية (UTC + buffers)
         start, end, unrestricted, pre_buf, post_buf = get_current_shift_window(request.user)
-        now = timezone.now()
+        now_utc = tz.now().astimezone(tz.utc)
         if not unrestricted and start and end:
             start_buf = start - timedelta(minutes=pre_buf or 0)
             end_buf = end + timedelta(minutes=post_buf or 0)
-            if not (start_buf <= now <= end_buf):
-                return fail('خارج وقت الوردية', code='outside_shift', status=400)
+            if not (start_buf <= now_utc <= end_buf):
+                return fail("خارج وقت الوردية", code="outside_shift", status=400), None
 
+        # تحقق الإحداثيات
         try:
-            lat = float(request.data.get('lat'))
-            lng = float(request.data.get('lng'))
+            lat = float(request.data.get("lat"))
+            lng = float(request.data.get("lng"))
+            acc = float(request.data.get("accuracy") or 0.0)
         except Exception:
-            return fail('إحداثيات غير صحيحة', code='invalid_coordinates', status=400)
+            return fail("إحداثيات غير صحيحة", code="invalid_coordinates", status=400), None
+
+        # تحقق الموقع
         allowed, reason, loc_id = is_location_allowed_for_user(request.user, lat, lng)
         if not allowed:
-            return fail(reason or 'الموقع غير مسموح', code='location_denied', status=400)
-        cleanup_employee = (Employee.objects
-                              .select_related("user", "supervisor")
-                              .filter(user=request.user)
-                              .first())
+            return fail(reason or "الموقع غير مسموح", code="location_denied", status=400), None
+
+        return None, normalized_action
+
+    def post(self, request):
+        # خطوة تنظيف تلقائية اختيارية (لا تغيّر السلوك الوظيفي)
+        cleanup_employee = (
+            Employee.objects.select_related("user", "supervisor")
+            .filter(user=request.user)
+            .first()
+        )
         if cleanup_employee:
-            cleanup_now = dj_timezone.now()
+            cleanup_now = tz.now()
             flag_absent_assignments_for_employee(
-                cleanup_employee,
-                as_of=cleanup_now,
-                notify=True,
+                cleanup_employee, as_of=cleanup_now, notify=True
             )
             close_stale_attendance_for_employee(
-                cleanup_employee,
-                as_of=cleanup_now,
-                notify=True,
+                cleanup_employee, as_of=cleanup_now, notify=True
             )
 
+        # فرض الوردية والموقع وصحة الإحداثيات + تطبيع action
+        early_fail, normalized_action = self._enforce_shift_and_location(request)
+        if early_fail is not None:
+            return early_fail  # يحتوي code/status واضحين
+
+        # تحقق الـ serializer لالتقاط باقي القيم (الموظف/الموقع/نافذة الوردية...)
         ser = AttendanceCheckSerializer(data=request.data, context={"request": request})
         if not ser.is_valid():
             # صياغة رسالة مفصلة بدل "تحقق من الحقول"
@@ -958,51 +1008,39 @@ class AttendanceCheckAPIView(APIView):
             nice = nice_hint or ("؛ ".join(err_text) if err_text else "الرجاء التحقق من الحقول المدخلة.")
             return Response({
                 "ok": False, "performed": False,
-                "action": request.data.get("action"),
+                "action": normalized_action or request.data.get("action"),
                 "detail": f"تعذر معالجة الطلب. {nice}",
-                "errors": ser.errors
+                "errors": ser.errors,
+                "code": "invalid_payload",
             }, status=status.HTTP_200_OK)
 
-        if not ser.validated_data.get('biometric_verified', False):
-            return Response({'detail': 'التحقق البيومتري فشل، لا يمكن تسجيل الحضور.'}, status=status.HTTP_403_FORBIDDEN)
-       
-        action = (request.data.get('action') or '').strip().lower()
-        if action in ('check_in', 'check-in'): action = 'checkin'
-        elif action in ('check_out', 'check-out'): action = 'checkout'
-        if action not in ('checkin', 'checkout'):
-            return fail('Invalid action', code='bad_action', status=400)
+        # التحقق البيومتري (إجباري)
+        if not ser.validated_data.get("biometric_verified", False):
+            return Response(
+                {
+                    "ok": False,
+                    "performed": False,
+                    "detail": "التحقق البيومتري فشل، لا يمكن تسجيل الحضور.",
+                    "code": "biometric_failed",
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
 
-        start, end, unrestricted, pre_buf, post_buf = get_current_shift_window(request.user)
-        now = timezone.now().astimezone(timezone.utc)
-        if not unrestricted and start and end:
-            start_buf = start - timedelta(minutes=pre_buf or 0)
-            end_buf = end + timedelta(minutes=post_buf or 0)
-            if not (start_buf <= now <= end_buf):
-                return fail('خارج وقت الوردية', code='outside_shift', status=400)
+        # استخراج القيم من الـ serializer
+        action            = normalized_action or ser.validated_data.get("action")
+        employee          = ser.validated_data.get("employee")
+        location          = ser.validated_data.get("location_obj")
+        lat               = ser.validated_data.get("lat")
+        lng               = ser.validated_data.get("lng")
+        acc               = ser.validated_data.get("accuracy")
+        raw_dist          = ser.validated_data.get("distance_m")
+        dist              = float(raw_dist) if raw_dist is not None else 0.0
+        radius            = ser.validated_data.get("location_radius_m")
+        center_lat        = ser.validated_data.get("location_center_lat")
+        center_lng        = ser.validated_data.get("location_center_lng")
+        current_shift_obj = ser.validated_data.get("current_shift")
+        current_assignment= ser.validated_data.get("current_assignment")
 
-        try:
-            lat = float(request.data.get('lat'))
-            lng = float(request.data.get('lng'))
-            acc = float(request.data.get('accuracy') or 0.0)
-        except Exception:
-            return fail('إحداثيات غير صحيحة', code='invalid_coordinates', status=400)
-
-        allowed, reason, loc_id = is_location_allowed_for_user(request.user, lat, lng)
-        if not allowed:
-            return fail(reason or 'الموقع غير مسموح', code='location_denied', status=400)
-
-                # استخراج القيم
-        action   = ser.validated_data.get("action")
-        employee = ser.validated_data.get("employee")
-        location = ser.validated_data.get("location_obj")
-        lat       = ser.validated_data.get("lat")
-        lng       = ser.validated_data.get("lng")
-        acc       = ser.validated_data.get("accuracy")
-        raw_dist  = ser.validated_data.get("distance_m")
-        dist      = float(raw_dist) if raw_dist is not None else 0.0
-        radius    = ser.validated_data.get("location_radius_m")
-        center_lat = ser.validated_data.get("location_center_lat")
-        center_lng = ser.validated_data.get("location_center_lng")
         (monitoring_payload,
          monitoring_active,
          monitoring_grace_minutes,
@@ -1011,8 +1049,7 @@ class AttendanceCheckAPIView(APIView):
          monitoring_rule,
          monitoring_config,
          monitoring_pause) = _monitoring_details(location, employee=employee)
-        current_shift_obj = ser.validated_data.get("current_shift")
-        current_assignment = ser.validated_data.get("current_assignment")
+
         shift_payload = _build_shift_payload(
             employee=employee,
             shift=current_shift_obj,
@@ -1022,12 +1059,13 @@ class AttendanceCheckAPIView(APIView):
             location=location,
             within_shift=ser.validated_data.get("shift_within_window"),
         )
-        violation_flag = bool(ser.validated_data.get("violation", False))
-        violation_reason = ser.validated_data.get("violation_reason")
-        violation_codes = list(ser.validated_data.get("violation_codes") or [])
 
-        now       = dj_timezone.now()
-        now_local = dj_timezone.localtime(now)
+        violation_flag    = bool(ser.validated_data.get("violation", False))
+        violation_reason  = ser.validated_data.get("violation_reason")
+        violation_codes   = list(ser.validated_data.get("violation_codes") or [])
+
+        now       = tz.now()
+        now_local = tz.localtime(now)
 
         start_dt  = ser.validated_data.get("shift_window_start")
         end_dt    = ser.validated_data.get("shift_window_end")
@@ -1058,6 +1096,7 @@ class AttendanceCheckAPIView(APIView):
 
         # ===== تنفيذ الإجراءات =====
         violation_escalated = False
+
         if action == "check_in":
             # منع تسجيل حضور جديد إن وُجد سجل مفتوح
             open_rec = (AttendanceRecord.objects
@@ -1070,10 +1109,7 @@ class AttendanceCheckAPIView(APIView):
                     reason_code="already_checked_in",
                     start=start_dt, end=end_dt, now=now_local,
                     monitoring=monitoring_payload,
-                    extra={
-                        "should_monitor_location": monitoring_should_follow,
-                        "shift": shift_payload,
-                    },
+                    extra={"should_monitor_location": monitoring_should_follow, "shift": shift_payload},
                 )
 
             # منع تعدد الحضور في نفس اليوم
@@ -1090,10 +1126,7 @@ class AttendanceCheckAPIView(APIView):
                     reason_code="already_checked_in_today",
                     start=start_dt, end=end_dt, now=now_local,
                     monitoring=monitoring_payload,
-                    extra={
-                        "should_monitor_location": monitoring_should_follow,
-                        "shift": shift_payload,
-                    },
+                    extra={"should_monitor_location": monitoring_should_follow, "shift": shift_payload},
                 )
 
             # إنشاء السجل
@@ -1110,6 +1143,7 @@ class AttendanceCheckAPIView(APIView):
                 update_fields.append("is_violation")
             if update_fields:
                 rec.save(update_fields=update_fields)
+
             if violation_flag:
                 record_geofence_violation(
                     employee=employee,
@@ -1124,6 +1158,7 @@ class AttendanceCheckAPIView(APIView):
                     violation_rule=monitoring_rule,
                 )
                 violation_escalated = True
+
             return Response({
                 "ok": True,
                 "performed": True,
@@ -1131,18 +1166,14 @@ class AttendanceCheckAPIView(APIView):
                 "detail": "✅ تم تسجيل حضورك بنجاح.",
                 "note": ("الوردية غير مقيّدة زمنيًا."
                          if start_dt is None and end_dt is None
-                         else (f"الفترة المسموحة للحضور: {start_dt.strftime('%H:%M')} → {end_dt.strftime('%H:%M')}"
+                         else (f"الفترة المسموحة للحضور: {tz.localtime(start_dt).strftime('%H:%M')} → {tz.localtime(end_dt).strftime('%H:%M')}"
                                if start_dt and end_dt else "")),
                 "record_id": str(rec.id),
                 "employee": getattr(employee, "full_name", str(employee.pk)),
                 "location_id": str(location.id) if getattr(location, "id", None) else None,
                 "location_name": getattr(location, "name", None),
                 "distance_m": round(dist, 2) if raw_dist is not None else None,
-                "location_center": {
-                    "lat": center_lat,
-                    "lng": center_lng,
-                    "radius_m": radius,
-                },
+                "location_center": {"lat": center_lat, "lng": center_lng, "radius_m": radius},
                 "violation": violation_flag,
                 "violation_reason": violation_reason,
                 "violation_codes": violation_codes,
@@ -1153,7 +1184,7 @@ class AttendanceCheckAPIView(APIView):
                 "should_monitor_location": monitoring_should_follow,
             }, status=status.HTTP_201_CREATED)
 
-        elif action == "check_out":
+        if action == "check_out":
             # منع الانصراف العادي إذا كان هناك انصراف مبكر اليوم
             today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
             today_end   = today_start + timedelta(days=1)
@@ -1168,10 +1199,7 @@ class AttendanceCheckAPIView(APIView):
                     reason_code="early_checkout_done",
                     start=start_dt, end=end_dt, now=now_local,
                     monitoring=monitoring_payload,
-                    extra={
-                        "should_monitor_location": monitoring_should_follow,
-                        "shift": shift_payload,
-                    },
+                    extra={"should_monitor_location": monitoring_should_follow, "shift": shift_payload},
                 )
 
             rec = (AttendanceRecord.objects
@@ -1183,10 +1211,7 @@ class AttendanceCheckAPIView(APIView):
                     detail="لا يوجد سجل حضور مفتوح لإقفاله.",
                     reason_code="no_open_record",
                     monitoring=monitoring_payload,
-                    extra={
-                        "should_monitor_location": monitoring_should_follow,
-                        "shift": shift_payload,
-                    },
+                    extra={"should_monitor_location": monitoring_should_follow, "shift": shift_payload},
                 )
 
             rec.check_out_time = now_local
@@ -1199,6 +1224,7 @@ class AttendanceCheckAPIView(APIView):
                 rec.is_violation = rec.is_violation or violation_flag
                 update_fields.append("is_violation")
             rec.save(update_fields=update_fields)
+
             violation_outside_minutes = None
             if violation_flag and rec.check_in_time:
                 violation_outside_minutes = (now_local - rec.check_in_time).total_seconds() / 60.0
@@ -1226,17 +1252,13 @@ class AttendanceCheckAPIView(APIView):
                 "detail": "✅ تم تسجيل انصرافك بنجاح.",
                 "note": ("الوردية غير مقيّدة زمنيًا."
                          if (start_dt is None and end_dt is None)
-                         else (f"يمكن الانصراف اعتبارًا من: {start_dt.strftime('%H:%M')}" if start_dt else "")),
+                         else (f"يمكن الانصراف اعتبارًا من: {tz.localtime(start_dt).strftime('%H:%M')}" if start_dt else "")),
                 "record_id": str(rec.id),
                 "employee": getattr(employee, "full_name", str(employee.pk)),
                 "location_id": str(rec.location.id) if rec.location else None,
                 "location_name": getattr(rec.location, "name", None) if rec.location else None,
                 "distance_m": round(dist, 2) if raw_dist is not None else None,
-                "location_center": {
-                    "lat": center_lat,
-                    "lng": center_lng,
-                    "radius_m": radius,
-                },
+                "location_center": {"lat": center_lat, "lng": center_lng, "radius_m": radius},
                 "violation": violation_flag,
                 "violation_reason": violation_reason,
                 "violation_codes": violation_codes,
@@ -1247,7 +1269,7 @@ class AttendanceCheckAPIView(APIView):
                 "should_monitor_location": False,
             }, status=status.HTTP_200_OK)
 
-        elif action == "early_check_out":
+        if action == "early_check_out":
             # يجب وجود سجل حضور مفتوح
             rec = (AttendanceRecord.objects
                    .filter(employee=employee, check_out_time__isnull=True)
@@ -1258,6 +1280,7 @@ class AttendanceCheckAPIView(APIView):
                     detail="لا يوجد سجل حضور مفتوح لإقفاله.",
                     reason_code="no_open_record",
                     monitoring=monitoring_payload,
+                    extra={"should_monitor_location": monitoring_should_follow, "shift": shift_payload},
                 )
 
             # مرّة واحدة يوميًا
@@ -1274,13 +1297,10 @@ class AttendanceCheckAPIView(APIView):
                     reason_code="early_checkout_once_per_day",
                     start=start_dt, end=end_dt, now=now_local,
                     monitoring=monitoring_payload,
-                    extra={
-                        "should_monitor_location": monitoring_should_follow,
-                        "shift": shift_payload,
-                    },
+                    extra={"should_monitor_location": monitoring_should_follow, "shift": shift_payload},
                 )
 
-            reason_txt = (request.data.get("early_reason") or "").strip()
+            reason_txt = (request.data.get("early_reason") or request.data.get("note") or "").strip()
             file_obj   = request.FILES.get("early_attachment")
             if not reason_txt:
                 return self._deny(
@@ -1288,10 +1308,7 @@ class AttendanceCheckAPIView(APIView):
                     detail="يجب كتابة سبب الانصراف المبكر.",
                     reason_code="early_checkout_reason_required",
                     monitoring=monitoring_payload,
-                    extra={
-                        "should_monitor_location": monitoring_should_follow,
-                        "shift": shift_payload,
-                    },
+                    extra={"should_monitor_location": monitoring_should_follow, "shift": shift_payload},
                 )
 
             rec.check_out_time = now_local
@@ -1310,6 +1327,7 @@ class AttendanceCheckAPIView(APIView):
                 rec.is_violation = rec.is_violation or violation_flag
                 update_fields.append("is_violation")
             rec.save(update_fields=update_fields)
+
             violation_outside_minutes = None
             if violation_flag and rec.check_in_time:
                 violation_outside_minutes = (now_local - rec.check_in_time).total_seconds() / 60.0
@@ -1342,11 +1360,7 @@ class AttendanceCheckAPIView(APIView):
                 "location_id": str(rec.location.id) if rec.location else None,
                 "location_name": getattr(rec.location, "name", None) if rec.location else None,
                 "distance_m": round(dist, 2) if raw_dist is not None else None,
-                "location_center": {
-                    "lat": center_lat,
-                    "lng": center_lng,
-                    "radius_m": radius,
-                },
+                "location_center": {"lat": center_lat, "lng": center_lng, "radius_m": radius},
                 "violation": violation_flag,
                 "violation_reason": violation_reason,
                 "violation_codes": violation_codes,
@@ -1357,17 +1371,14 @@ class AttendanceCheckAPIView(APIView):
                 "should_monitor_location": False,
             }, status=status.HTTP_200_OK)
 
+        # أي إجراء غير مدعوم (لن يصل غالبًا بسبب التطبيع)
         return self._deny(
             action=action,
             detail="إجراء غير مدعوم.",
             reason_code="unsupported_action",
             monitoring=monitoring_payload,
-            extra={
-                "should_monitor_location": monitoring_should_follow,
-                "shift": shift_payload,
-            },
+            extra={"should_monitor_location": monitoring_should_follow, "shift": shift_payload},
         )
-
 
 class ResolveLocationAPIView(APIView):
     permission_classes = [IsAuthenticated]
