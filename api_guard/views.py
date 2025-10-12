@@ -913,7 +913,16 @@ class AttendanceCheckAPIView(APIView):
         if early_fail is not None:
             return early_fail
 
-        ser = AttendanceCheckSerializer(data=request.data, context={"request": request, "resolved_location": getattr(request, "_resolved_location", None), "normalized_bio": getattr(request, "_normalized_bio", None)})
+        # استخدم البيانات الآمنة التي تتعامل مع text/plain JSON أيضًا
+        safe_data = self._safe_data(request)
+        ser = AttendanceCheckSerializer(
+            data=safe_data,
+            context={
+                "request": request,
+                "resolved_location": getattr(request, "_resolved_location", None),
+                "normalized_bio": getattr(request, "_normalized_bio", None),
+            },
+        )
         if not ser.is_valid():
             # رسالة مفصلة
             err_text = []
