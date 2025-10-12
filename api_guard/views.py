@@ -653,13 +653,18 @@ class AttendanceCheckAPIView(APIView):
 
     def _safe_data(self, request):
         data = request.data
-        if (not data) and request.content_type and request.content_type.startswith('text/plain'):
+        try:
+            ct = (request.content_type or "").lower()
+        except Exception:
+            ct = ""
+        if (not data) and ct.startswith("text/plain"):
             import json
             try:
-                data = json.loads(request.body.decode('utf-8'))
+                data = json.loads(request.body.decode("utf-8"))
             except Exception:
                 data = {}
         return data
+
 
     def _deny(self, *, action, detail, reason_code,
               start=None, end=None, now=None, extra=None, monitoring=None):
@@ -689,10 +694,19 @@ class AttendanceCheckAPIView(APIView):
         return True
 
     def _early_payload_validation(self, request):
-        # قراءة آمنة (تسمح بمحاولة فك JSON إذا وصل content-type=text/plain)
         data = getattr(self, "_safe_data", lambda r: r.data)(request)
 
-        # ===== action =====
+        # تطبيع action
+        def _normalize_action_incoming(v):
+            if not v: return None
+            x = str(v).strip().lower()
+            mapping = {     
+                "checkin": "check_in", "check_in": "check_in",
+                "checkout": "check_out", "check_out": "check_out",
+                "early_checkout": "early_check_out", "early-checkout": "early_check_out", "early_check_out": "early_check_out",
+            }
+            return mapping.get(x)
+
         normalized_action = _normalize_action_incoming(data.get("action"))
         if normalized_action is None:
             return Response({
@@ -702,22 +716,28 @@ class AttendanceCheckAPIView(APIView):
                 "reason_code": "INVALID_ACTION",
             }, status=status.HTTP_200_OK)
 
-        # ===== location_id (قبول نص/رقم + رسائل أوضح) =====
+        # location_id (نص/رقم) + رسائل أوضح
         raw_loc_field = data.get("location_id") or data.get("location")
         raw_loc = raw_loc_field.strip() if isinstance(raw_loc_field, str) else raw_loc_field
         location = None
         if raw_loc not in (None, "", 0, "0"):
-            # جرّب مباشرة بالـ pk كما هو (يدعم نص/رقم)
             try:
-                location = Location.objects.filter(pk=raw_loc).first()
+                from .models import Location
             except Exception:
-                location = None
-            # إن لم يُعثر عليه، جرّب تحويله إلى int
-            if location is None:
                 try:
-                    location = Location.objects.filter(pk=int(raw_loc)).first()
+                    from models import Location
+                except Exception:
+                    Location = None
+            if Location is not None:
+                try:
+                    location = Location.objects.filter(pk=raw_loc).first()
                 except Exception:
                     location = None
+                if location is None:
+                    try:
+                        location = Location.objects.filter(pk=int(raw_loc)).first()
+                    except Exception:
+                        location = None
 
         if location is None:
             return self._deny(
@@ -727,7 +747,7 @@ class AttendanceCheckAPIView(APIView):
                 extra={"got": (raw_loc if raw_loc not in (None, "", 0, "0") else None)}
             )
 
-        # ===== biometric (قبول مفاتيح قديمة/جديدة + تطبيع) =====
+        # مفاتيح البصمة (قديم/جديد) + alias + fallback
         raw_ok = data.get("bio_ok")
         raw_ok2 = data.get("biometric_verified")
         bio_ok = bool(raw_ok if raw_ok is not None else raw_ok2)
@@ -735,15 +755,14 @@ class AttendanceCheckAPIView(APIView):
         raw_method = (data.get("bio_method") or data.get("biometric_method") or "")
         bio_method = (str(raw_method).lower().strip())
 
-        # alias mapping لأسماء شائعة
         alias = {
             "faceid": "face", "face_id": "face", "facial": "face",
             "touchid": "fingerprint", "touch_id": "fingerprint", "fp": "fingerprint",
-            "code": "pin", "passcode": "pin", "password": "pin"
+            "code": "pin", "passcode": "pin", "password": "pin", "pin_code": "pin",
+            "strong": "fingerprint", "weak": "pin"
         }
         bio_method = alias.get(bio_method, bio_method)
 
-        # fallback آمن: إن التحقق ناجح والطريقة فارغة، اعتبرها PIN
         if bio_ok and bio_method == "":
             bio_method = "pin"
 
@@ -763,7 +782,7 @@ class AttendanceCheckAPIView(APIView):
                 extra={"accepted": ["fingerprint", "face", "pin"], "got": bio_method or None},
             )
 
-        # ===== GPS =====
+        # GPS
         try:
             acc = float(data.get("accuracy") or 0.0)
             float(data.get("lat"))
@@ -772,24 +791,37 @@ class AttendanceCheckAPIView(APIView):
             return self._deny(action=normalized_action, detail="إحداثيات غير صحيحة", reason_code="INVALID_COORDINATES")
         if acc > 100.0:
             return self._deny(
-                action=normalized_action,
-                detail="دقة GPS منخفضة",
+                action=normalized_action, detail="دقة GPS منخفضة",
                 reason_code="GPS_ACCURACY_LOW",
                 extra={"min_required": 100, "accuracy": acc}
             )
 
-        # ===== Device bind (اختياري) =====
+        # الجهاز
         device_hash = request.headers.get("X-Device-Hash") or data.get("device_hash")
         if self._device_binding_enabled():
             if not device_hash or not self._is_device_allowed(request.user, device_hash):
-                return self._deny(
-                    action=normalized_action,
-                    detail="جهاز غير موثّق",
-                    reason_code="DEVICE_NOT_TRUSTED"
-                )
+                return self._deny(action=normalized_action, detail="جهاز غير موثّق", reason_code="DEVICE_NOT_TRUSTED")
 
-        # خزّن الموقع المحلول في request للخطوات اللاحقة لتفادي إعادة الجلب
+        # لوج عربي للتشخيص
+        try:
+            usr = getattr(request, "user", None)
+            uid = getattr(usr, "id", None) or getattr(usr, "pk", None)
+            logger_api.info("[حضور] المستخدم=%s الجهاز=%s الإجراء=%s الموقع=%s acc=%s",
+                            uid, device_hash, normalized_action, raw_loc, acc)
+        except Exception:
+            pass
+
+        # تخزين الموقع المحلول للخطوات اللاحقة
         request._resolved_location = location
+
+        # تعديل البيانات الواردة للاستمرارية
+        try:
+            data["action"] = normalized_action
+            data["bio_ok"] = bio_ok
+            data["bio_method"] = bio_method
+            data["location_id"] = getattr(location, "id", raw_loc)
+        except Exception:
+            pass
 
         return None
 

@@ -388,6 +388,7 @@ class EmployeeMeSerializer(serializers.ModelSerializer):
 class AttendanceCheckSerializer(serializers.Serializer):
     # نقبل location_id كنص/رقم، ونسمح أيضًا بحقل بديل "location"
     location_id = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
     location = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     action = serializers.ChoiceField(choices=[
@@ -450,6 +451,7 @@ class AttendanceCheckSerializer(serializers.Serializer):
 
     # ===== التحقق =====
     def validate(self, attrs):
+        resolved_location = getattr(self.context.get('request', None), '_resolved_location', None)
         request = self.context["request"]
         user    = request.user
 
@@ -470,7 +472,8 @@ class AttendanceCheckSerializer(serializers.Serializer):
 
             # جرّب كما هو (يدعم نص/رقم)
             try:
-                location = Location.objects.filter(pk=raw_loc).first()
+                location = resolved_location or Location.objects.get(id=attrs["location_id"])
+
             except Exception:
                 location = None
             # وإن فشل، جرّب int
