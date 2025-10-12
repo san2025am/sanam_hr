@@ -952,6 +952,38 @@ class AttendanceCheckAPIView(APIView):
 
         return None, normalized_action
 
+    # ===== دعم ربط الأجهزة (اختياري) =====
+    def _device_binding_enabled(self) -> bool:
+        """
+        يحدد ما إذا كان تقييد الأجهزة مفعّلًا. يأخذ القيمة من الإعداد
+        ENABLE_DEVICE_BINDING (افتراضيًا False)
+        """
+        try:
+            return bool(getattr(settings, "ENABLE_DEVICE_BINDING", False))
+        except Exception:
+            return False
+
+    def _is_device_allowed(self, user, device_hash: str) -> bool:
+        """
+        يتحقق إن كان الجهاز مسموحًا للمستخدم. نقبل كلا الصيغتين: الخام والمُهشّرة.
+        """
+        if not self._device_binding_enabled():
+            return True
+        if not device_hash:
+            return False
+        try:
+            hashed = _device_hash(device_hash)
+        except Exception:
+            hashed = device_hash
+        try:
+            return TrustedDevice.objects.filter(
+                user=user,
+                deleted_at__isnull=True,
+                device_hash__in=[device_hash, hashed],
+            ).exists()
+        except Exception:
+            return False
+
     def post(self, request):
         # تنظيف (اختياري)
         cleanup_employee = (
