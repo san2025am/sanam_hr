@@ -1590,6 +1590,7 @@ class LocationPingAPIView(APIView):
         outside_minutes = None
         violation_reason = None
         violation_codes: list[str] = []
+        paused = bool(monitoring_pause)
         if tracking_active and not within_radius:
             violation_codes = ["outside_polygon"] if mode == "polygon" else ["outside_radius"]
             violation_reason = (
@@ -1618,7 +1619,7 @@ class LocationPingAPIView(APIView):
                 outside_start = recorded_at
             outside_minutes = max(0.0, (recorded_at - outside_start).total_seconds() / 60.0)
 
-            if outside_minutes >= monitoring_grace_minutes:
+            if (not paused) and (outside_minutes >= monitoring_grace_minutes):
                 existing_violation = LocationPing.objects.filter(
                     employee=employee,
                     violation_triggered=True,
