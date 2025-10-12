@@ -1,0 +1,29 @@
+{% extends "admin_extras/base.html" %}
+{% load static %}
+
+{% block title %}لوحة المعلومات{% endblock %}
+
+{% block page_head %}
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+{% endblock %}
+
+{% block page_css %}
+  <link rel="stylesheet" href="{% static 'admin_extras/css/dashboard.css' %}">
+{% endblock %}
+
+{% block page_content %}
+<div class="admin-extras-dashboard container-fluid">
+  <h1 class="my-3"><span class="brand-logo"></span> لوحة المعلومات</h1>
+
+  {% include 'admin_extras/partials/_cards.html' %}
+
+  {% include 'admin_extras/partials/_charts.html' %}
+
+  {# payload is built in the view to avoid printing as literal #}
+  {{ dashboard_payload|json_script:"dashboard-data" }}
+</div>
+{% endblock %}
+
+{% block page_js %}
+  <script src="{% static 'admin_extras/js/dashboard.js' %}"></script>
+{% endblock %}

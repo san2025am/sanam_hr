@@ -1,0 +1,27 @@
+{% extends "admin_extras/base.html" %}
+{% load static %}
+
+{% block title %}دردشة الأدمن{% endblock %}
+
+{% block page_css %}
+  <link rel="stylesheet" href="{% static 'admin_extras/css/chat.css' %}">
+{% endblock %}
+
+{% block page_content %}
+<div class="admin-extras-chat container-fluid">
+  <h1 class="my-3">دردشة الفريق (أدمن)</h1>
+  <div class="card">
+    <div class="card-body chat-box" id="chat-box"></div>
+    <div class="card-footer d-flex gap-2">
+      <input type="text" id="chat-input" class="form-control" placeholder="اكتب رسالة..." />
+      <button class="btn btn-primary" id="chat-send">إرسال</button>
+    </div>
+  </div>
+  <script id="chat-config" type="application/json">{"messages_url":"messages.json","send_url":"send/"}</script>
+  
+</div>
+{% endblock %}
+
+{% block page_js %}
+  <script src="{% static 'admin_extras/js/chat.js' %}"></script>
+{% endblock %}

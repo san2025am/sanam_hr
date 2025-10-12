@@ -1,0 +1,6 @@
+/* Chat page styles */
+.admin-extras-chat .chat-box {
+  max-height: 50vh;
+  overflow-y: auto;
+}
+

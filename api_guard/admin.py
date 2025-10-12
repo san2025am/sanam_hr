@@ -1,6 +1,11 @@
 # api_guard/admin.py
 
 from django.contrib import admin
+try:
+    from import_export.admin import ImportExportModelAdmin
+except Exception:  # fallback if not installed yet
+    class ImportExportModelAdmin(admin.ModelAdmin):
+        pass
 from django.contrib.admin.models import LogEntry
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.contrib.contenttypes.models import ContentType
@@ -14,6 +19,12 @@ from .models import (
     UniformItem, UniformDelivery, UniformDeliveryItem,
     TrustedDevice, DeviceLoginChallenge
 )
+try:
+    from .resources import EmployeeResource, LocationResource, ReportResource, RequestResource
+    _HAS_IMPORT_EXPORT = True
+except Exception:  # pragma: no cover - optional dependency
+    EmployeeResource = LocationResource = ReportResource = RequestResource = None
+    _HAS_IMPORT_EXPORT = False
 from django import forms
 from django.core.exceptions import ValidationError
 
@@ -138,7 +149,9 @@ class RoleAdmin(admin.ModelAdmin):
 # =========================
 
 @admin.register(Employee)
-class EmployeeAdmin(admin.ModelAdmin):
+class EmployeeAdmin(ImportExportModelAdmin):
+    if EmployeeResource:
+        resource_classes = [EmployeeResource]
     list_display = (
         'full_name', 'national_id', 'phone_number', 'bank_name',
         'monthly_leave_quota_hours', 'supervisor'
@@ -226,7 +239,9 @@ class LocationAdminForm(forms.ModelForm):
         return cleaned
 
 @admin.register(Location)
-class LocationAdmin(admin.ModelAdmin):
+class LocationAdmin(ImportExportModelAdmin):
+    if LocationResource:
+        resource_classes = [LocationResource]
     form = LocationAdminForm
     list_display = ("name", "client_name", "gps_coordinates", "gps_radius", "use_polygon")
     search_fields = ('employee__full_name',)
@@ -340,7 +355,9 @@ class SalaryAdmin(admin.ModelAdmin):
 # =========================
 
 @admin.register(Report)
-class ReportAdmin(admin.ModelAdmin):
+class ReportAdmin(ImportExportModelAdmin):
+    if ReportResource:
+        resource_classes = [ReportResource]
     list_display = ('employee', 'report_type', 'location', 'status', 'created_at')
     list_filter = ('status', 'report_type', 'location')
     search_fields = ('employee__full_name', 'description')
@@ -348,7 +365,9 @@ class ReportAdmin(admin.ModelAdmin):
     autocomplete_fields = ('employee', 'location')
 
 @admin.register(Request)
-class RequestAdmin(admin.ModelAdmin):
+class RequestAdmin(ImportExportModelAdmin):
+    if RequestResource:
+        resource_classes = [RequestResource]
     list_display = (
         'employee', 'request_type', 'status', 'approver', 'created_at',
         'leave_start', 'leave_end', 'leave_hours', 'leave_deducted'

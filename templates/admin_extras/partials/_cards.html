@@ -1,0 +1,63 @@
+<div class="info-cards">
+  <div class="row">
+    <div class="col-lg-3 col-md-6 mb-3">
+      <div class="card text-bg-primary">
+        <div class="card-body d-flex justify-content-between align-items-center">
+          <div class="card-title mb-0">الموظفون</div>
+          <div class="display-6 mb-0">{{ employees_count }}</div>
+        </div>
+      </div>
+    </div>
+    <div class="col-lg-3 col-md-6 mb-3">
+      <div class="card text-bg-success">
+        <div class="card-body d-flex justify-content-between align-items-center">
+          <div class="card-title mb-0">المواقع</div>
+          <div class="display-6 mb-0">{{ locations_count }}</div>
+        </div>
+      </div>
+    </div>
+    <div class="col-lg-3 col-md-6 mb-3">
+      <div class="card text-bg-info">
+        <div class="card-body d-flex justify-content-between align-items-center">
+          <div class="card-title mb-0">التقارير</div>
+          <div class="display-6 mb-0">{{ reports_count }}</div>
+        </div>
+      </div>
+    </div>
+    <div class="col-lg-3 col-md-6 mb-3">
+      <div class="card text-bg-warning">
+        <div class="card-body d-flex justify-content-between align-items-center">
+          <div class="card-title mb-0">الطلبات</div>
+          <div class="display-6 mb-0">{{ requests_count }}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="col-lg-4 col-md-6 mb-3">
+      <div class="card text-bg-primary">
+        <div class="card-body d-flex justify-content-between align-items-center">
+          <div class="card-title mb-0">حضور اليوم</div>
+          <div class="display-6 mb-0">{{ attendance_today }}</div>
+        </div>
+      </div>
+    </div>
+    <div class="col-lg-4 col-md-6 mb-3">
+      <div class="card text-bg-info">
+        <div class="card-body d-flex justify-content-between align-items-center">
+          <div class="card-title mb-0">مخالفات اليوم</div>
+          <div class="display-6 mb-0">{{ violations_today }}</div>
+        </div>
+      </div>
+    </div>
+    <div class="col-lg-4 col-md-6 mb-3">
+      <div class="card text-bg-warning">
+        <div class="card-body d-flex justify-content-between align-items-center">
+          <div class="card-title mb-0">طلبات قيد المراجعة</div>
+          <div class="display-6 mb-0">{{ pending_requests_count }}</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

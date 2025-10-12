@@ -1,0 +1,69 @@
+{% extends "admin/base_site.html" %}
+{% load i18n static %}
+
+{% block title %}{% trans 'تسجيل الدخول' %}{% endblock %}
+
+{% block extrastyle %}
+  {{ block.super }}
+  <link rel="stylesheet" href="{% static 'admin_extras/css/brand.css' %}">
+  <link rel="stylesheet" href="{% static 'admin_extras/css/login.css' %}">
+{% endblock %}
+
+{% block content %}
+<div class="sanam-login">
+  <div class="topbar">
+    <div class="brand">سنـام الأمـن</div>
+    <button id="theme-toggle" class="btn btn-sm btn-primary" title="تبديل الثيم">🌓</button>
+  </div>
+
+  <div class="login-card">
+    <div class="logo-wrap">
+      <div class="logo" aria-label="شعار سنم"></div>
+      <div class="brand-sub">SANAM ALAMN</div>
+    </div>
+
+    <h2 class="heading">{% trans 'تسجيل الدخول' %}</h2>
+
+    {% if form.errors %}
+      <div class="alert alert-danger" role="alert">
+        {% trans 'بيانات الدخول غير صحيحة. حاول مرة أخرى.' %}
+      </div>
+    {% endif %}
+
+    <form action="{% url 'admin:login' %}" method="post" novalidate>
+      {% csrf_token %}
+      <input type="hidden" name="next" value="{{ next }}" />
+
+      <div class="field">
+        <label for="id_username">{% trans 'اسم المستخدم' %}</label>
+        <div class="input">
+          <input type="text" name="username" autofocus required id="id_username"
+                 placeholder="{% trans 'اسم المستخدم' %}" value="{{ form.username.value|default:'' }}" />
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="id_password">{% trans 'كلمة المرور' %}</label>
+        <div class="input with-addon">
+          <input type="password" name="password" required id="id_password" placeholder="{% trans 'كلمة المرور' %}" />
+          <button type="button" class="addon" id="toggle-pass" aria-label="إظهار/إخفاء كلمة المرور">👁</button>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button type="submit" class="btn btn-primary btn-lg w-100">{% trans 'تسجيل الدخول' %} 🔒</button>
+      </div>
+    </form>
+
+    <div class="extras">
+      <a class="muted" href="#" onclick="return false;">{% trans 'نسيت كلمة المرور؟' %}</a>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extrahead %}
+  {{ block.super }}
+  <script src="{% static 'admin_extras/js/theme-toggle.js' %}"></script>
+  <script src="{% static 'admin_extras/js/login.js' %}"></script>
+{% endblock %}

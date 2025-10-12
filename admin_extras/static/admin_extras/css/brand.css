@@ -1,0 +1,120 @@
+/* Brand palette from logo */
+:root {
+  --brand-gold: #c6921c;
+  --brand-gold-600: #ab7a15;
+  --brand-brown: #6d4b2e;     /* lighter header */
+  --brand-brown-700: #5a3a22;  /* lighter sidebar */
+
+  /* Theme tokens */
+  --bg: #0f0f0f;
+  --bg-2: #1e252b;
+  --text: #e9ecef;
+  --muted: #adb5bd;
+  --card-bg: #2c333a;
+  --card-border: #3a4148;
+  --card-header: rgba(255,255,255,.06);
+  --sand-bg: #e5d3b6; /* dashboard light background similar to login */
+  --accent-teal: #1fbf9f;
+  --accent-cyan: #17a2b8;
+  --accent-amber: #f0ad4e;
+  /* Header */
+  --header-bg: var(--brand-brown);
+  --header-text: #ffffff;
+}
+
+/* Light theme overrides */
+:root[data-theme="light"] {
+  --bg: #f8f9fa;
+  --bg-2: #ffffff;
+  --text: #212529;
+  --muted: #495057;
+  --card-bg: #ffffff;
+  --card-border: #e5e7eb;
+  --card-header: #f1f3f5;
+  --sand-bg: #e5d3b6;
+}
+
+/* Admin chrome overrides (works with/without Jazzmin) */
+.navbar, .navbar.navbar-dark {
+  background-color: var(--header-bg) !important;
+  color: var(--header-text) !important;
+}
+
+.sidebar, .sidebar-dark-primary { /* jazzmin */
+  background-color: var(--brand-brown-700) !important;
+}
+
+a, .page-link { color: var(--brand-gold); }
+a:hover { color: var(--brand-gold-600); }
+
+/* Header links/text in white for contrast */
+.navbar .navbar-brand,
+.navbar .nav-link,
+.navbar a,
+.main-header .navbar .nav-link,
+.brand-link {
+  color: var(--header-text) !important;
+}
+.navbar .nav-link:hover, .navbar a:hover { color: #ffffff !important; opacity: .9; }
+
+.btn-primary, .btn.btn-primary {
+  background-color: var(--brand-gold);
+  border-color: var(--brand-gold-600);
+}
+.btn-primary:hover {
+  background-color: var(--brand-gold-600);
+}
+
+/* Toolbar */
+.admin-extras-toolbar { position: sticky; top: 0; z-index: 100; padding: .5rem; text-align: end; }
+
+/* Container colors */
+.admin-extras-dashboard, .admin-extras-chat {
+  color: var(--text);
+}
+
+.admin-extras-dashboard .card, .admin-extras-chat .card { background-color: var(--card-bg); border-color: var(--card-border); }
+.admin-extras-dashboard .card .card-header, .admin-extras-chat .card .card-header { background-color: var(--card-header); }
+
+/* Dashboard container with sand background similar to login */
+.admin-extras-dashboard { background: var(--sand-bg); padding: 12px; border-radius: 12px; }
+
+/* Cards color mapping */
+.card.text-bg-primary { background-color: var(--brand-gold) !important; color: #fff; }
+.card.text-bg-success { background-color: #198754 !important; color: #fff; }
+.card.text-bg-info { background-color: #0dcaf0 !important; color: #000; }
+.card.text-bg-warning { background-color: #ffc107 !important; color: #000; }
+
+/* Dashboard tweaks */
+.admin-extras-dashboard h1 .brand-logo {
+  height: 42px;
+  width: auto;
+  vertical-align: middle;
+  margin-inline-end: .5rem;
+}
+
+.admin-extras-dashboard .card { border: none; }
+
+/* Show brand logo in admin header (works with/without Jazzmin) */
+#site-name::before {
+  content: "";
+  display: inline-block;
+  width: 28px;
+  height: 28px;
+  background-image: var(--brand-logo-url, url('../img/logo.png'));
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center;
+  margin-inline-end: .5rem;
+  vertical-align: middle;
+}
+
+/* Reusable brand-logo element */
+.brand-logo {
+  display: inline-block;
+  width: 42px; height: 42px;
+  background-image: var(--brand-logo-url, url('../img/logo.png'));
+  background-size: contain;
+  background-repeat: no-repeat; background-position: center;
+  vertical-align: middle; margin-inline-end: .5rem;
+}

@@ -18,6 +18,7 @@ Including another URLconf
 
 from django.contrib import admin
 from django.urls import path, include # تأكد من وجود include هنا
+from django.views.generic import RedirectView
 
 # استيراد الـ Views الخاصة بـ simple-jwt
 from rest_framework_simplejwt.views import (
@@ -27,6 +28,10 @@ from rest_framework_simplejwt.views import (
 from django.http import HttpResponse
 
 urlpatterns = [
+    # Redirect /admin/ to the custom dashboard
+    path('admin/', RedirectView.as_view(pattern_name='admin_extras:dashboard', permanent=False)),
+    # Admin extras (dashboard + chat) under /admin/* must come before admin.site.urls
+    path('admin/', include('admin_extras.urls', namespace='admin_extras')),
     path('admin/', admin.site.urls),
    path('', lambda request: HttpResponse('API is running')),
     # هذا السطر صحيح ومهم، لكنه يعالج فقط الروابط داخل تطبيق api_guard

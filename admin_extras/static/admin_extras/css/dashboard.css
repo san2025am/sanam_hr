@@ -1,0 +1,35 @@
+/* Dashboard-specific styles */
+.admin-extras-dashboard h1 { font-weight: 700; letter-spacing: .5px; }
+
+/* Old cards layout with tidy spacing */
+.admin-extras-dashboard .info-cards .card {
+  border: none;
+  border-radius: 12px;
+  box-shadow: 0 6px 16px rgba(0,0,0,.08);
+}
+.admin-extras-dashboard .info-cards .card .card-body { min-height: 92px; }
+
+/* Colored cards like mobile design */
+.admin-extras-dashboard .info-cards .card.text-bg-primary {
+  background: linear-gradient(135deg, var(--brand-gold), var(--brand-gold-600)) !important;
+  color: #fff !important;
+}
+.admin-extras-dashboard .info-cards .card.text-bg-success {
+  background: linear-gradient(135deg, var(--accent-teal), #129a80) !important;
+  color: #fff !important;
+}
+.admin-extras-dashboard .info-cards .card.text-bg-info {
+  background: linear-gradient(135deg, var(--accent-cyan), #0aa1c2) !important;
+  color: #fff !important;
+}
+.admin-extras-dashboard .info-cards .card.text-bg-warning {
+  background: linear-gradient(135deg, var(--accent-amber), #d9992f) !important;
+  color: #1f1f1f !important;
+}
+
+/* Chart cards */
+.admin-extras-dashboard .card .card-header {
+  background-color: rgba(0,0,0,.1);
+  border-bottom: 1px solid var(--card-border);
+  font-weight: 600;
+}

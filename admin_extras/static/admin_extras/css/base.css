@@ -1,0 +1,6 @@
+/* Base styles for admin_extras pages */
+.admin-extras-dashboard .chart-wrapper {
+  position: relative;
+  height: 320px;
+}
+

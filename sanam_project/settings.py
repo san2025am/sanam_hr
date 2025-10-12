@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 import os
+import importlib
 
 from pathlib import Path
 from dotenv import load_dotenv
@@ -80,17 +81,22 @@ if '31.97.158.157' not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append('31.97.158.157')
 # Application definition
 
+_HAS_JAZZMIN = importlib.util.find_spec('jazzmin') is not None
+
 INSTALLED_APPS = [
+    *(['jazzmin'] if _HAS_JAZZMIN else []),
     'django.contrib.admin',
     'django.contrib.auth',
     'django.contrib.contenttypes',
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    *(['import_export'] if importlib.util.find_spec('import_export') is not None else []),
     'rest_framework',
     'rest_framework_simplejwt',
     # تطبيقاتك الخاصة (Local apps)
     'api_guard',
+    'admin_extras',
     'rest_framework.authtoken',
     'rest_framework_simplejwt.token_blacklist',
 ]
@@ -112,7 +118,7 @@ ROOT_URLCONF = 'sanam_project.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [BASE_DIR / 'templates'],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -139,19 +145,31 @@ WSGI_APPLICATION = 'sanam_project.wsgi.application'
 
 # sanam_project/settings.py
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.mysql', # تغيير المحرك إلى MySQL
-        'NAME': 'sanam_db',                    # اسم قاعدة البيانات التي أنشأتها
-        'USER': 'sanam_user',                  # اسم المستخدم الذي أنشأته
-        'PASSWORD': 'Asmg36@2022',      # كلمة المرور التي أنشأتها للمستخدم
-        'HOST': '31.97.158.157',               # أو '127.0.0.1'. يعني أن قاعدة البيانات على نفس الخادم
-        'PORT': '3306',                        # المنفذ الافتراضي لـ MySQL
-        'OPTIONS': {
-            'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
-        },
+# قاعدة البيانات قابلة للتهيئة عبر البيئة، مع سقوط تلقائي إلى SQLite في التطوير
+DB_ENGINE = os.getenv('DB_ENGINE', '').lower()
+MYSQL_HOST = os.getenv('MYSQL_HOST')
+
+if DB_ENGINE == 'sqlite' or (DEBUG and not MYSQL_HOST):
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
     }
-}
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.mysql',
+            'NAME': os.getenv('MYSQL_DB', 'sanam_db'),
+            'USER': os.getenv('MYSQL_USER', 'sanam_user'),
+            'PASSWORD': os.getenv('MYSQL_PASSWORD', 'Asmg36@2022'),
+            'HOST': MYSQL_HOST or '31.97.158.157',
+            'PORT': os.getenv('MYSQL_PORT', '3306'),
+            'OPTIONS': {
+                'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
+            },
+        }
+    }
 
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
@@ -251,3 +269,39 @@ X_FRAME_OPTIONS = "DENY"
 # Optional CORS/CSRF via env
 CORS_ALLOWED_ORIGINS = [o for o in os.getenv('DJANGO_CORS_ALLOWED_ORIGINS','').split(',') if o]
 CSRF_TRUSTED_ORIGINS = [o for o in os.getenv('DJANGO_CSRF_TRUSTED_ORIGINS','').split(',') if o]
+
+# Jazzmin settings
+JAZZMIN_SETTINGS = {
+    'site_title': 'لوحة إدارة سنم',
+    'site_header': 'إدارة سنم',
+    'site_brand': 'Sanam Admin',
+    'welcome_sign': 'مرحباً بك في لوحة إدارة سنم',
+    'site_logo': 'admin_extras/img/logo.png',
+    'login_logo': 'admin_extras/img/logo.png',
+    'site_logo_classes': 'img-circle',
+    'copyright': 'Sanam',
+    'show_ui_builder': True,
+    'topmenu_links': [
+        {'name': 'Dashboard', 'url': 'admin_extras:dashboard', 'permissions': ['auth.view_user']},
+        {'name': 'Chat', 'url': 'admin_extras:chat', 'permissions': ['auth.view_user']},
+        {'model': 'api_guard.user'},
+        {'app': 'api_guard'},
+    ],
+    'icons': {
+        'auth.user': 'fas fa-user',
+        'auth.Group': 'fas fa-users',
+        'api_guard.employee': 'fas fa-id-badge',
+        'api_guard.location': 'fas fa-map-marker-alt',
+        'api_guard.report': 'fas fa-file-alt',
+        'api_guard.request': 'fas fa-envelope-open-text',
+        'admin_extras.chatmessage': 'fas fa-comments',
+    },
+    'custom_css': 'admin_extras/css/brand.css',
+} if _HAS_JAZZMIN else {}
+
+JAZZMIN_UI_TWEAKS = {
+    'theme': 'darkly',
+    'dark_mode_theme': 'darkly',
+    'sidebar_fixed': True,
+    'navbar_fixed': True,
+} if _HAS_JAZZMIN else {}
