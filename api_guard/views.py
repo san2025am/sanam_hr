@@ -329,6 +329,53 @@ def _assignment_window_for(
     return None, None, None, None
 
 
+def _build_shift_payload(
+    *,
+    employee: Optional[Employee],
+    shift: Optional[Shift],
+    assignment: Optional[EmployeeShiftAssignment],
+    allowed_start: Optional[dt.datetime],
+    allowed_end: Optional[dt.datetime],
+    location: Optional[Location],
+    within_shift: Optional[bool],
+) -> dict:
+    """
+    يبني حمولة وصف الوردية المعروضة للعميل.
+    يعيد قاموسًا صغيرًا آمنًا للاستخدام في الواجهة.
+    """
+    try:
+        payload: dict[str, object] = {}
+        if shift is not None:
+            name = getattr(shift, "name", None)
+            if name:
+                payload["name"] = name
+
+        if assignment is not None:
+            try:
+                asg_loc = getattr(assignment, "location", None)
+                if asg_loc is not None:
+                    payload["assignment_location_name"] = getattr(asg_loc, "name", None)
+                    try:
+                        matches = (getattr(asg_loc, "id", None) == getattr(location, "id", None))
+                        payload["matches_location"] = matches
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        if allowed_start is not None:
+            payload["window_start"] = _local_iso(allowed_start)
+        if allowed_end is not None:
+            payload["window_end"] = _local_iso(allowed_end)
+
+        if within_shift is not None:
+            payload["within_shift"] = bool(within_shift)
+
+        return payload
+    except Exception:
+        return {}
+
+
 def _monitoring_details(
     location,
     *,
