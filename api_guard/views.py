@@ -650,6 +650,44 @@ class AttendanceCheckAPIView(APIView):
     permission_classes = [IsAuthenticated]
     parser_classes = (JSONParser, FormParser, MultiPartParser)
 
+    def _deny(
+        self,
+        *,
+        action=None,
+        detail: str = "",
+        reason_code: str | None = None,
+        start=None,
+        end=None,
+        now=None,
+        monitoring: dict | None = None,
+        extra: dict | None = None,
+        status_code: int = status.HTTP_200_OK,
+    ):
+        """يرجع استجابة مهيكلة موحّدة للأخطاء مع حقل detail دائماً.
+        لا نستخدم 4xx افتراضيًا كي لا تكسر واجهات قديمة؛ نعطي 200 مع ok=false.
+        """
+        payload = {
+            "ok": False,
+            "performed": False,
+            "action": action,
+            "detail": detail or "تعذر تنفيذ الطلب.",
+        }
+        if reason_code:
+            payload["reason_code"] = reason_code
+        if start is not None:
+            payload["shift_window_start"] = _local_iso(start)
+        if end is not None:
+            payload["shift_window_end"] = _local_iso(end)
+        if now is not None:
+            payload["now"] = _local_iso(now)
+        if monitoring:
+            payload["monitoring"] = monitoring
+        if extra:
+            # ضم الحقول الإضافية تحت مفتاح extra لتجنّب تضارب المفاتيح
+            payload["extra"] = extra
+
+        return Response(payload, status=status_code)
+
     def _safe_data(self, request):
         """
         قراءة آمنة لبيانات الطلب:
@@ -885,7 +923,8 @@ class AttendanceCheckAPIView(APIView):
 
 
     def _enforce_shift_and_location(self, request):
-        data = request.data
+        # استخدم القراءة الآمنة بدل request.data لتجنّب UnsupportedMediaType عند text/plain
+        data = self._safe_data(request)
 
         normalized_action = _normalize_action_incoming(data.get("action"))
         if normalized_action is None:
@@ -961,7 +1000,7 @@ class AttendanceCheckAPIView(APIView):
             nice = nice_hint or ("؛ ".join(err_text) if err_text else "الرجاء التحقق من الحقول المدخلة.")
             return Response({
                 "ok": False, "performed": False,
-                "action": normalized_action or request.data.get("action"),
+                "action": normalized_action or safe_data.get("action"),
                 "detail": f"تعذر معالجة الطلب. {nice}",
                 "errors": ser.errors,
                 "reason_code": "INVALID_PAYLOAD",
