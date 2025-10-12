@@ -1017,6 +1017,21 @@ class AttendanceCheckAPIView(APIView):
 
         # استخدم البيانات الآمنة التي تتعامل مع text/plain JSON أيضًا
         safe_data = self._safe_data(request)
+        # طبّع location_id إلى نص لتجنّب خطأ "Not a valid string" حتى إن لم نستخدمه
+        if isinstance(safe_data, dict) and 'location_id' in safe_data:
+            try:
+                val = safe_data.get('location_id')
+                if val is None or (isinstance(val, str) and val.strip() == ''):
+                    # اتركه كما هو (الحقل اختياري)
+                    pass
+                else:
+                    safe_data['location_id'] = str(val)
+            except Exception:
+                # في أسوأ الأحوال احذف الحقل لتترك مهمة تحديد الموقع للسياق
+                try:
+                    safe_data.pop('location_id', None)
+                except Exception:
+                    pass
         ser = AttendanceCheckSerializer(
             data=safe_data,
             context={
