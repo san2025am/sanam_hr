@@ -1237,8 +1237,8 @@ class AttendanceCheckAPIView(APIView):
             if update_fields:
                 rec.save(update_fields=update_fields)
 
-            if violation_flag:
-                _ = _apply_geofence_salary_deduction(employee, GEOFENCE_DEDUCTION_PERCENT)  # إن أردت الخصم فورًا
+            if violation_flag and not monitoring_pause:
+                _ = _apply_geofence_salary_deduction(employee, GEOFENCE_DEDUCTION_PERCENT)  # إن أردت الخصم فورًا (غير موقّف)
                 violation_escalated = False  # الإنذار عند check_out/early حسب المدة
 
             return Response({
@@ -1303,7 +1303,7 @@ class AttendanceCheckAPIView(APIView):
             rec.save(update_fields=update_fields)
 
             violation_outside_minutes = None
-            if violation_flag and rec.check_in_time:
+            if (not monitoring_pause) and violation_flag and rec.check_in_time:
                 violation_outside_minutes = (now_local - rec.check_in_time).total_seconds() / 60.0
                 if violation_outside_minutes >= monitoring_grace_minutes:
                     # تسجيل مخالفة
@@ -1391,7 +1391,7 @@ class AttendanceCheckAPIView(APIView):
             rec.save(update_fields=update_fields)
 
             violation_outside_minutes = None
-            if violation_flag and rec.check_in_time:
+            if (not monitoring_pause) and violation_flag and rec.check_in_time:
                 violation_outside_minutes = (now_local - rec.check_in_time).total_seconds() / 60.0
                 if violation_outside_minutes >= monitoring_grace_minutes:
                     _ = _apply_geofence_salary_deduction(employee, GEOFENCE_DEDUCTION_PERCENT)
