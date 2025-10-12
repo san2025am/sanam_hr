@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# تعديل شامل: تحويل كل الـ endpoints إلى POST + تحسينات الحضور والنبضات والجيوفنس
+# تعديل شامل: تحويل كل الاااااااااااـ endpoints إلى POST + تحسينات الحضور والنبضات والجيوفنس
 import datetime as dt
 import hashlib
 import secrets
