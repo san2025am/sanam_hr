@@ -479,7 +479,8 @@ class AttendanceCheckSerializer(serializers.Serializer):
             # وإن فشل، جرّب int
             if location is None:
                 try:
-                    location = Location.objects.filter(pk=int(raw_loc)).first()
+                    location = resolved_location or Location.objects.get(id=attrs["location_id"])
+
                 except Exception:
                     location = None
 

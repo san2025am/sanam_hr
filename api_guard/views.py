@@ -646,10 +646,9 @@ class GuardMeView(APIView):
 # =========================
 # Attendance (POST-only)
 # =========================
-
 class AttendanceCheckAPIView(APIView):
     permission_classes = [IsAuthenticated]
-    parser_classes = (JSONParser, FormParser, MultiPartParser) 
+    parser_classes = (JSONParser, FormParser, MultiPartParser)
 
     def _safe_data(self, request):
         data = request.data
@@ -665,45 +664,16 @@ class AttendanceCheckAPIView(APIView):
                 data = {}
         return data
 
-
-    def _deny(self, *, action, detail, reason_code,
-              start=None, end=None, now=None, extra=None, monitoring=None):
-        payload = {
-            "ok": False,
-            "performed": False,
-            "action": action,
-            "detail": detail,
-            "reason_code": str(reason_code or "UNKNOWN"),
-        }
-        wnd = {}
-        if start is not None: wnd["from"] = _local_iso(start)
-        if end   is not None: wnd["to"]   = _local_iso(end)
-        if now   is not None: wnd["now"]  = _local_iso(now)
-        if wnd: payload["window"] = wnd
-        if extra: payload.update(extra)
-        if monitoring is not None:
-            payload["monitoring"] = monitoring
-        logger_api.info("ATTENDANCE DENY: %s", payload)
-        return Response(payload, status=status.HTTP_200_OK)
-
-    def _device_binding_enabled(self):
-        return True
-
-    def _is_device_allowed(self, user, device_hash: str):
-        # اربطه بجدول TrustedDevice إن رغبت
-        return True
-
     def _early_payload_validation(self, request):
         data = getattr(self, "_safe_data", lambda r: r.data)(request)
 
-        # تطبيع action
         def _normalize_action_incoming(v):
             if not v: return None
             x = str(v).strip().lower()
-            mapping = {     
-                "checkin": "check_in", "check_in": "check_in",
-                "checkout": "check_out", "check_out": "check_out",
-                "early_checkout": "early_check_out", "early-checkout": "early_check_out", "early_check_out": "early_check_out",
+            mapping = {
+                "checkin":"check_in","check_in":"check_in",
+                "checkout":"check_out","check_out":"check_out",
+                "early_checkout":"early_check_out","early-checkout":"early_check_out","early_check_out":"early_check_out",
             }
             return mapping.get(x)
 
@@ -802,7 +772,7 @@ class AttendanceCheckAPIView(APIView):
             if not device_hash or not self._is_device_allowed(request.user, device_hash):
                 return self._deny(action=normalized_action, detail="جهاز غير موثّق", reason_code="DEVICE_NOT_TRUSTED")
 
-        # لوج عربي للتشخيص
+        # لوج عربي
         try:
             usr = getattr(request, "user", None)
             uid = getattr(usr, "id", None) or getattr(usr, "pk", None)
@@ -811,10 +781,8 @@ class AttendanceCheckAPIView(APIView):
         except Exception:
             pass
 
-        # تخزين الموقع المحلول للخطوات اللاحقة
+        # تخزين الموقع المحلول
         request._resolved_location = location
-
-        # تعديل البيانات الواردة للاستمرارية
         try:
             data["action"] = normalized_action
             data["bio_ok"] = bio_ok
