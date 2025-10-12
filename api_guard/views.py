@@ -665,15 +665,30 @@ class AttendanceCheckAPIView(APIView):
         return data
 
     def _early_payload_validation(self, request):
+        """
+        تحقّق مبكّر للحمولة:
+        - يطبّع action
+        - يقرأ GPS ويتحقق من الدقة
+        - يحلّ location_id (نص/رقم) أو يلتقط تلقائيًا أقرب موقع ضمن نصف قطره
+        - يقبل مفاتيح البصمة القديمة/الجديدة + alias + fallback
+        - يتحقق من جهاز العميل إن كان مفعّلًا
+        - يكتب لوج عربي مختصر
+        - يملأ request._resolved_location ويهذّب data للاستخدام اللاحق
+        """
+        # استخدم _safe_data لدعم text/plain
         data = getattr(self, "_safe_data", lambda r: r.data)(request)
 
+        # 1) تطبيع الإجراء
         def _normalize_action_incoming(v):
-            if not v: return None
+            if not v:
+                return None
             x = str(v).strip().lower()
             mapping = {
-                "checkin":"check_in","check_in":"check_in",
-                "checkout":"check_out","check_out":"check_out",
-                "early_checkout":"early_check_out","early-checkout":"early_check_out","early_check_out":"early_check_out",
+                "checkin": "check_in", "check_in": "check_in",
+                "checkout": "check_out", "check_out": "check_out",
+                "early_checkout": "early_check_out",
+                "early-checkout": "early_check_out",
+                "early_check_out": "early_check_out",
             }
             return mapping.get(x)
 
@@ -686,44 +701,106 @@ class AttendanceCheckAPIView(APIView):
                 "reason_code": "INVALID_ACTION",
             }, status=status.HTTP_200_OK)
 
-        # location_id (نص/رقم) + رسائل أوضح
+        # 2) GPS أولًا (نحتاجه للالتقاط التلقائي للموقع لاحقًا)
+        try:
+            acc = float(data.get("accuracy") or 0.0)
+            lat = float(data.get("lat"))
+            lng = float(data.get("lng"))
+        except Exception:
+            return self._deny(
+                action=normalized_action,
+                detail="إحداثيات غير صحيحة",
+                reason_code="INVALID_COORDINATES"
+            )
+
+        MIN_ACC = 100.0
+        if acc > MIN_ACC:
+            return self._deny(
+                action=normalized_action,
+                detail="دقة GPS منخفضة",
+                reason_code="GPS_ACCURACY_LOW",
+                extra={"min_required": int(MIN_ACC), "accuracy": acc}
+            )
+
+        # 3) حلّ الموقع: (location_id نص/رقم) ثم fallback تلقائي لأقرب موقع ضمن نصف قطره
+        #    - لا نرفض مباشرةً إن لم يوجد، بل نحاول الالتقاط من الإحداثيات.
         raw_loc_field = data.get("location_id") or data.get("location")
         raw_loc = raw_loc_field.strip() if isinstance(raw_loc_field, str) else raw_loc_field
         location = None
-        if raw_loc not in (None, "", 0, "0"):
+
+        # محاولة بالـ pk كما هو (يدعم نص/رقم)، ثم كـ int
+        try:
+            from .models import Location
+        except Exception:
             try:
-                from .models import Location
+                from models import Location  # في حال هيكلة مختلفة
             except Exception:
+                Location = None
+
+        if Location is not None and raw_loc not in (None, "", 0, "0"):
+            try:
+                location = Location.objects.filter(pk=raw_loc).first()
+            except Exception:
+                location = None
+            if location is None:
                 try:
-                    from models import Location
-                except Exception:
-                    Location = None
-            if Location is not None:
-                try:
-                    location = Location.objects.filter(pk=raw_loc).first()
+                    location = Location.objects.filter(pk=int(raw_loc)).first()
                 except Exception:
                     location = None
-                if location is None:
-                    try:
-                        location = Location.objects.filter(pk=int(raw_loc)).first()
-                    except Exception:
-                        location = None
 
+        # إن لم يُعثر عليه، جرّب الالتقاط التلقائي من الإحداثيات باحترام نصف القطر
+        if Location is not None and location is None:
+            from math import radians, sin, cos, asin, sqrt
+
+            def haversine_m(lat1, lon1, lat2, lon2):
+                R = 6371000.0
+                dlat = radians(lat2 - lat1)
+                dlon = radians(lon2 - lon1)
+                a = sin(dlat/2)**2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dlon/2)**2
+                c = 2 * asin(sqrt(a))
+                return R * c
+
+            candidates = Location.objects.exclude(gps_coordinates__isnull=True)\
+                                        .exclude(gps_coordinates__exact="")
+            best = None
+            best_d = None
+            for L in candidates:
+                try:
+                    loc_lat, loc_lng = [float(x.strip()) for x in L.gps_coordinates.split(",", 1)]
+                    d = haversine_m(lat, lng, loc_lat, loc_lng)
+                    # احترم نصف القطر إن مٌعرّف
+                    try:
+                        radius = float(getattr(L, "gps_radius") or 0.0)
+                    except Exception:
+                        radius = 0.0
+                    if radius and d > radius:
+                        continue
+                    if best is None or d < best_d:
+                        best, best_d = L, d
+                except Exception:
+                    continue
+
+            if best is not None:
+                location = best
+                # نحدّث data ليكمل التيار بقيَم صحيحة
+                data["location_id"] = getattr(location, "id", None)
+
+        # إن بقي None بعد كل المحاولات → رفض مع رسالة واضحة
         if location is None:
             return self._deny(
                 action=normalized_action,
-                detail="موقع غير محدد: مُعرّف الموقع غير صالح أو غير موجود.",
+                detail="موقع غير محدد: مُعرّف الموقع غير صالح ولا يوجد موقع مناسب بالقرب.",
                 reason_code="INVALID_LOCATION",
                 extra={"got": (raw_loc if raw_loc not in (None, "", 0, "0") else None)}
             )
 
-        # مفاتيح البصمة (قديم/جديد) + alias + fallback
+        # 4) مفاتيح البصمة (قديم/جديد) + alias + fallback آمن
         raw_ok = data.get("bio_ok")
         raw_ok2 = data.get("biometric_verified")
         bio_ok = bool(raw_ok if raw_ok is not None else raw_ok2)
 
         raw_method = (data.get("bio_method") or data.get("biometric_method") or "")
-        bio_method = (str(raw_method).lower().strip())
+        bio_method = str(raw_method).lower().strip()
 
         alias = {
             "faceid": "face", "face_id": "face", "facial": "face",
@@ -733,6 +810,7 @@ class AttendanceCheckAPIView(APIView):
         }
         bio_method = alias.get(bio_method, bio_method)
 
+        # لو نجح التحقق ولم تصل طريقة، اعتبرها PIN (fallback)
         if bio_ok and bio_method == "":
             bio_method = "pin"
 
@@ -749,39 +827,31 @@ class AttendanceCheckAPIView(APIView):
                 action=normalized_action,
                 detail="طريقة البصمة غير معروفة",
                 reason_code="BIO_METHOD_UNKNOWN",
-                extra={"accepted": ["fingerprint", "face", "pin"], "got": bio_method or None},
+                extra={"accepted": ["fingerprint", "face", "pin"], "got": (bio_method or None)},
             )
 
-        # GPS
-        try:
-            acc = float(data.get("accuracy") or 0.0)
-            float(data.get("lat"))
-            float(data.get("lng"))
-        except Exception:
-            return self._deny(action=normalized_action, detail="إحداثيات غير صحيحة", reason_code="INVALID_COORDINATES")
-        if acc > 100.0:
-            return self._deny(
-                action=normalized_action, detail="دقة GPS منخفضة",
-                reason_code="GPS_ACCURACY_LOW",
-                extra={"min_required": 100, "accuracy": acc}
-            )
-
-        # الجهاز
+        # 5) الجهاز (اختياري)
         device_hash = request.headers.get("X-Device-Hash") or data.get("device_hash")
         if self._device_binding_enabled():
             if not device_hash or not self._is_device_allowed(request.user, device_hash):
-                return self._deny(action=normalized_action, detail="جهاز غير موثّق", reason_code="DEVICE_NOT_TRUSTED")
+                return self._deny(
+                    action=normalized_action,
+                    detail="جهاز غير موثّق",
+                    reason_code="DEVICE_NOT_TRUSTED"
+                )
 
-        # لوج عربي
+        # 6) لوج عربي للتشخيص
         try:
             usr = getattr(request, "user", None)
             uid = getattr(usr, "id", None) or getattr(usr, "pk", None)
-            logger_api.info("[حضور] المستخدم=%s الجهاز=%s الإجراء=%s الموقع=%s acc=%s",
-                            uid, device_hash, normalized_action, raw_loc, acc)
+            logger_api.info(
+                "[حضور] المستخدم=%s الجهاز=%s الإجراء=%s الموقع=%s acc=%s",
+                uid, device_hash, normalized_action, getattr(location, "id", raw_loc), acc
+            )
         except Exception:
             pass
 
-        # تخزين الموقع المحلول
+        # 7) تمرير القيم المحلولة للخطوات التالية
         request._resolved_location = location
         try:
             data["action"] = normalized_action
