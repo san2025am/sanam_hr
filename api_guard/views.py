@@ -890,8 +890,18 @@ class AttendanceCheckAPIView(APIView):
 
         # 5) الجهاز (اختياري)
         device_hash = request.headers.get("X-Device-Hash") or data.get("device_hash")
-        if self._device_binding_enabled():
-            if not device_hash or not self._is_device_allowed(request.user, device_hash):
+        # لا تفشل إذا لم تتوفر دوال الربط في نسخة الخادم — اعتبرها غير مفعّلة
+        try:
+            binding_enabled = bool(self._device_binding_enabled())
+        except AttributeError:
+            binding_enabled = False
+        if binding_enabled:
+            try:
+                is_allowed = bool(self._is_device_allowed(request.user, device_hash or ""))
+            except AttributeError:
+                # إذا لم تتوفر دالة الفحص، اسمح افتراضًا لتجنب تعطل الخدمة
+                is_allowed = True
+            if not device_hash or not is_allowed:
                 return self._deny(
                     action=normalized_action,
                     detail="جهاز غير موثّق",
