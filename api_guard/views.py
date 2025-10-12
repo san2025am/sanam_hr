@@ -651,18 +651,38 @@ class AttendanceCheckAPIView(APIView):
     parser_classes = (JSONParser, FormParser, MultiPartParser)
 
     def _safe_data(self, request):
-        data = request.data
+        """
+        قراءة آمنة لبيانات الطلب:
+        - إذا كان Content-Type = text/plain أو غير محدد، نحاول json.loads من الجسم مباشرة.
+        - وإلا نستخدم request.data (DRF parser).
+        الهدف: تجنب Unsupported media type قبل الوصول للـ view.
+        """
         try:
             ct = (request.content_type or "").lower()
         except Exception:
             ct = ""
-        if (not data) and ct.startswith("text/plain"):
-            import json
+
+        if (not ct) or ct.startswith("text/plain"):
             try:
-                data = json.loads(request.body.decode("utf-8"))
+                raw = request.body.decode("utf-8") if hasattr(request, "body") else None
             except Exception:
-                data = {}
-        return data
+                raw = None
+            if raw:
+                import json
+                try:
+                    parsed = json.loads(raw)
+                    return parsed if isinstance(parsed, (dict, list)) else {}
+                except Exception:
+                    return {}
+            # لا يوجد جسم نصي صالح؛ أعد قاموسًا فارغًا
+            return {}
+
+        # لباقي الأنواع، اعتمد على DRF parsers
+        try:
+            return request.data
+        except Exception:
+            # في حال فشل الـ parser، لا نفشل النداء ونعود ببيانات فارغة
+            return {}
 
     def _early_payload_validation(self, request):
         """
