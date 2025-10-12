@@ -1,6 +1,7 @@
 # PUT INTO: api_guard/utils/maps.py
 # Patched: shift window normalized to timezone-aware UTC; location allow helper.
 
+import datetime as dt
 from django.utils import timezone
 from .geo import haversine_m  # ensure correct import path
 
@@ -23,8 +24,9 @@ def get_current_shift_window(user):
             start = timezone.make_aware(start, timezone.get_current_timezone())
         if end and timezone.is_naive(end):
             end = timezone.make_aware(end, timezone.get_current_timezone())
-        start = start.astimezone(timezone.utc) if start else None
-        end = end.astimezone(timezone.utc) if end else None
+        # Django 5 لا يوفر timezone.utc؛ استخدم datetime.timezone.utc
+        start = start.astimezone(dt.timezone.utc) if start else None
+        end = end.astimezone(dt.timezone.utc) if end else None
         return start, end, unrestricted, pre_buf, post_buf
     except Exception:
         return None, None, False, 0, 0

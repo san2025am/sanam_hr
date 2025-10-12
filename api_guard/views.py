@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# تعديل شامل: تحويل كل الاااااااااااـ endpoints إلى POST + تحسينات الحضور والنبضات والجيوفنس
+# تعديل شامل: تحويل كل غغغغغغ endpoints إلى POST + تحسينات الحضور والنبضات والجيوفنس
 import datetime as dt
 import hashlib
 import secrets
@@ -942,7 +942,8 @@ class AttendanceCheckAPIView(APIView):
 
         # نافذة الوردية
         start, end, unrestricted, pre_buf, post_buf = get_current_shift_window(request.user)
-        now_utc = dj_timezone.now().astimezone(dj_timezone.utc)
+        # Django 5 أزال timezone.utc؛ استخدم datetime.timezone.utc
+        now_utc = dj_timezone.now().astimezone(dt.timezone.utc)
         if not unrestricted and start and end:
             start_buf = start - timedelta(minutes=pre_buf or 0)
             end_buf = end + timedelta(minutes=post_buf or 0)
@@ -1504,7 +1505,8 @@ class LocationPingAPIView(APIView):
 
         # تأكد من داخل نافذة الوردية بحسب إعداد شركتك (اختياري)
         start, end, unrestricted, pre_buf, post_buf = get_current_shift_window(request.user)
-        now = timezone.now().astimezone(timezone.utc)
+        # Django 5 compatibility — لا تستخدم timezone.utc
+        now = timezone.now().astimezone(dt.timezone.utc)
         if not unrestricted and start and end:
             start_buf = start - timedelta(minutes=pre_buf or 0)
             end_buf = end + timedelta(minutes=post_buf or 0)
