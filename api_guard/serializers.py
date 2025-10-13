@@ -300,6 +300,9 @@ class EmployeeMeSerializer(serializers.ModelSerializer):
     tasks  = serializers.SerializerMethodField()
     shifts = serializers.SerializerMethodField()
     shift_assignments = serializers.SerializerMethodField()
+    # إضافات: قائمة المخالفات وخلاصة تفصيلية للخصومات
+    violations = serializers.SerializerMethodField()
+    salary_deduction_details = serializers.SerializerMethodField()
 
     class Meta:
         model  = Employee
@@ -311,7 +314,7 @@ class EmployeeMeSerializer(serializers.ModelSerializer):
             "employee_instructions", "location_instructions",
             "supervisor_name", "supervisor_phone",
             "locations", "salary", "tasks", "shifts",
-            "shift_assignments",
+            "shift_assignments", "violations", "salary_deduction_details",
         ]
 
     def get_shift_assignments(self, obj):
@@ -378,6 +381,103 @@ class EmployeeMeSerializer(serializers.ModelSerializer):
                 "post_shift_buffer_minutes": getattr(a, "post_shift_buffer_minutes", 0),
             })
         return out
+
+    def _dec_str(self, value) -> str | None:
+        if value in (None, ""):
+            return None
+        try:
+            from decimal import Decimal, ROUND_HALF_UP
+            d = Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            return format(d.normalize(), "f")
+        except Exception:
+            return str(value)
+
+    def get_violations(self, obj):
+        qs = (EmployeeViolation.objects
+              .filter(employee=obj)
+              .select_related("rule", "location")
+              .order_by("-occurred_at"))
+        out = []
+        for v in qs:
+            out.append({
+                "id": v.id,
+                "rule_title": getattr(v.rule, "title", "") or "",
+                "description": v.description or "",
+                "occurred_at": v.occurred_at.isoformat() if v.occurred_at else None,
+                "status": v.status,
+                "deduction_value": self._dec_str(getattr(v, "deduction_value", None)),
+                "location_name": getattr(v.location, "name", None),
+            })
+        return out
+
+    def get_salary_deduction_details(self, obj):
+        """
+        تُرجع قائمة تفصيلية لمصادر الخصومات: مخالفات/سلف/نموذج زي.
+        الحقول: {source, reason, amount, date, reference_id, reference_label}
+        """
+        items: list[dict] = []
+
+        # 1) مخالفات برصيد خصم
+        vio_qs = (EmployeeViolation.objects
+                  .filter(employee=obj)
+                  .select_related("rule")
+                  .order_by("-occurred_at"))
+        for v in vio_qs:
+            try:
+                amt = getattr(v, "deduction_value", None)
+                if amt is None:
+                    continue
+                # تجاهل الصفر أو السالب
+                from decimal import Decimal
+                if Decimal(str(amt)) <= Decimal("0"):
+                    continue
+            except Exception:
+                pass
+            items.append({
+                "source": "violation",
+                "reason": getattr(v.rule, "title", "") or (v.description or "مخالفة"),
+                "amount": self._dec_str(getattr(v, "deduction_value", None)),
+                "date": v.occurred_at.isoformat() if v.occurred_at else None,
+                "reference_id": v.id,
+                "reference_label": f"Violation #{v.id}",
+            })
+
+        # 2) سلف معتمدة (تُضاف للخصومات وفق الإشارة)
+        adv_qs = (Advance.objects
+                  .filter(employee=obj, status='approved')
+                  .order_by("-approved_at", "-created_at"))
+        for a in adv_qs:
+            items.append({
+                "source": "advance",
+                "reason": (a.reason or "سلفة معتمدة"),
+                "amount": self._dec_str(a.amount),
+                "date": (a.approved_at or a.created_at).isoformat() if (a.approved_at or a.created_at) else None,
+                "reference_id": a.id,
+                "reference_label": f"Advance #{a.id}",
+            })
+
+        # 3) زي رسمي مدفوع بالخصم ومغلق
+        uni_qs = (UniformDelivery.objects
+                  .filter(employee=obj, is_finalized=True, payment_method='deduction')
+                  .order_by("-delivery_date", "-id"))
+        for u in uni_qs:
+            items.append({
+                "source": "uniform",
+                "reason": "خصم قيمة زي رسمي",
+                "amount": self._dec_str(u.total_value),
+                "date": u.delivery_date.isoformat() if u.delivery_date else None,
+                "reference_id": u.id,
+                "reference_label": f"Uniform #{u.id}",
+            })
+
+        # ترتيب تنازلي بالتاريخ إن أمكن
+        def _key(x):
+            return x.get("date") or ""
+        try:
+            items.sort(key=_key, reverse=True)
+        except Exception:
+            pass
+        return items
 
 
 # =========================
