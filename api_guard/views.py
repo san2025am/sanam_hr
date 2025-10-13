@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-# تعديل شامل: تحويل كل غغغغغغ endpoints إلى POST + تحسينات الحضور والنبضات والجيوفنس
+# تعديل شامل: تحويل ggggggggggggggكل  endpoints إلى POST + تحسينات الحضور والنبضات والجيوفنس
 import datetime as dt
 import hashlib
 import secrets
@@ -99,6 +99,64 @@ except (InvalidOperation, TypeError, ValueError):
     GEOFENCE_DEDUCTION_PERCENT = Decimal("2")
 if GEOFENCE_DEDUCTION_PERCENT < 0:
     GEOFENCE_DEDUCTION_PERCENT = Decimal("0")
+
+
+def _create_geofence_violation_record(
+    *,
+    employee: Employee,
+    location: Optional[Location],
+    deduction_value: Decimal,
+    outside_minutes: Optional[float] = None,
+    grace_minutes: Optional[int] = None,
+    rule: Optional[ViolationRule] = None,
+) -> Optional[EmployeeViolation]:
+    """
+    يُنشئ سجل مخالفة (EmployeeViolation) لحالة الخروج عن النطاق.
+    يتأكد من وجود لائحة المناسبة، ويضبط مستوى التحذير والخصم المطبق.
+    """
+    try:
+        if rule is None:
+            try:
+                rule = ViolationRule.objects.get(title=GEOFENCE_RULE_TITLE)
+            except ViolationRule.DoesNotExist:
+                rule = ViolationRule.objects.create(
+                    title=GEOFENCE_RULE_TITLE,
+                    description=GEOFENCE_RULE_DESCRIPTION,
+                    default_action="deduct",
+                    default_deduction_percent=_decimal_or_zero(GEOFENCE_DEDUCTION_PERCENT),
+                )
+
+        warning_level = (
+            EmployeeViolation.objects.filter(employee=employee, rule=rule).count() + 1
+        )
+
+        parts = [
+            "مخالفة الخروج عن نطاق الموقع",
+        ]
+        if outside_minutes is not None and grace_minutes is not None:
+            try:
+                parts.append(
+                    f"مدة الابتعاد: {outside_minutes:.1f} دقيقة (المسموح: {grace_minutes} دقيقة)"
+                )
+            except Exception:
+                parts.append(
+                    f"مدة الابتعاد: {outside_minutes} دقيقة (المسموح: {grace_minutes} دقيقة)"
+                )
+        description = " — ".join(parts)
+
+        violation = EmployeeViolation.objects.create(
+            employee=employee,
+            rule=rule,
+            reported_by=getattr(employee, "supervisor", None),
+            location=location,
+            description=description,
+            warning_level=warning_level,
+            deduction_value=_decimal_or_zero(deduction_value),
+        )
+        return violation
+    except Exception:  # لا تعطل المسار الرئيسي إذا فشل الإنشاء
+        logger.exception("Failed to create geofence EmployeeViolation record")
+        return None
 
 
 def _make_aware(dt_value):
@@ -1338,7 +1396,7 @@ class AttendanceCheckAPIView(APIView):
                 violation_outside_minutes = (now_local - rec.check_in_time).total_seconds() / 60.0
                 if violation_outside_minutes >= monitoring_grace_minutes:
                     # تسجيل مخالفة
-                    _ = _apply_geofence_salary_deduction(employee, GEOFENCE_DEDUCTION_PERCENT)
+                    _ded = _apply_geofence_salary_deduction(employee, GEOFENCE_DEDUCTION_PERCENT)
                     violation_escalated = True
                     try:
                         notify_geofence_violation(
@@ -1347,6 +1405,17 @@ class AttendanceCheckAPIView(APIView):
                             outside_minutes=violation_outside_minutes,
                             grace_minutes=monitoring_grace_minutes,
                             recorded_at=now_local,
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        _create_geofence_violation_record(
+                            employee=employee,
+                            location=rec.location or location,
+                            deduction_value=_ded,
+                            outside_minutes=violation_outside_minutes,
+                            grace_minutes=monitoring_grace_minutes,
+                            rule=monitoring_rule,
                         )
                     except Exception:
                         pass
@@ -1435,7 +1504,7 @@ class AttendanceCheckAPIView(APIView):
             if (not monitoring_pause) and violation_flag and rec.check_in_time:
                 violation_outside_minutes = (now_local - rec.check_in_time).total_seconds() / 60.0
                 if violation_outside_minutes >= monitoring_grace_minutes:
-                    _ = _apply_geofence_salary_deduction(employee, GEOFENCE_DEDUCTION_PERCENT)
+                    _ded = _apply_geofence_salary_deduction(employee, GEOFENCE_DEDUCTION_PERCENT)
                     violation_escalated = True
                     try:
                         notify_geofence_violation(
@@ -1444,6 +1513,17 @@ class AttendanceCheckAPIView(APIView):
                             outside_minutes=violation_outside_minutes,
                             grace_minutes=monitoring_grace_minutes,
                             recorded_at=now_local,
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        _create_geofence_violation_record(
+                            employee=employee,
+                            location=rec.location or location,
+                            deduction_value=_ded,
+                            outside_minutes=violation_outside_minutes,
+                            grace_minutes=monitoring_grace_minutes,
+                            rule=monitoring_rule,
                         )
                     except Exception:
                         pass
@@ -1797,7 +1877,7 @@ class LocationPingAPIView(APIView):
                 ).exists()
                 if not existing_violation:
                     # تصعيد وخصم إن لزم
-                    _ = _apply_geofence_salary_deduction(employee, GEOFENCE_DEDUCTION_PERCENT)
+                    _ded = _apply_geofence_salary_deduction(employee, GEOFENCE_DEDUCTION_PERCENT)
                     ping.violation_triggered = True
                     ping.save(update_fields=["violation_triggered"])
                     violation_triggered = True
@@ -1808,6 +1888,17 @@ class LocationPingAPIView(APIView):
                             outside_minutes=outside_minutes,
                             grace_minutes=monitoring_grace_minutes,
                             recorded_at=recorded_at,
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        _create_geofence_violation_record(
+                            employee=employee,
+                            location=loc,
+                            deduction_value=_ded,
+                            outside_minutes=outside_minutes,
+                            grace_minutes=monitoring_grace_minutes,
+                            rule=monitoring_rule,
                         )
                     except Exception:
                         pass
