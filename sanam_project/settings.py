@@ -148,16 +148,7 @@ WSGI_APPLICATION = 'sanam_project.wsgi.application'
 # قاعدة البيانات قابلة للتهيئة عبر البيئة، مع سقوط تلقائي إلى SQLite في التطوير
 DB_ENGINE = os.getenv('DB_ENGINE', '').lower()
 MYSQL_HOST = os.getenv('MYSQL_HOST')
-
-if DB_ENGINE == 'sqlite' or (DEBUG and not MYSQL_HOST):
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': BASE_DIR / 'db.sqlite3',
-        }
-    }
-else:
-    DATABASES = {
+DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.mysql',
             'NAME': os.getenv('MYSQL_DB', 'sanam_db'),
