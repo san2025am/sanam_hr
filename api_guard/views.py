@@ -1190,6 +1190,23 @@ class AttendanceCheckAPIView(APIView):
             "shift_window_start": _local_iso(start_dt),
             "shift_window_end": _local_iso(end_dt),
         })
+        # احسب وقت الانصراف المسموح وفق سماح الانصراف إن وُجد
+        earliest_checkout = None
+        try:
+            asg = current_assignment
+            if asg is not None and start_dt is not None and end_dt is not None:
+                if getattr(asg, "checkout_grace_hours", None) is not None:
+                    th_min = int(round(float(asg.checkout_grace_hours) * 60))
+                    earliest_checkout = start_dt + timedelta(minutes=th_min)
+                elif getattr(asg, "checkout_grace", None) is not None:
+                    th_min = int(asg.checkout_grace)
+                    earliest_checkout = start_dt + timedelta(minutes=th_min)
+                else:
+                    earliest_checkout = end_dt
+        except Exception:
+            earliest_checkout = None
+        if earliest_checkout is not None:
+            monitoring_payload["earliest_checkout_at"] = _local_iso(earliest_checkout)
         monitoring_should_follow = bool(monitoring_active and within_shift_window)
 
         if blocked:
@@ -1666,6 +1683,28 @@ class LocationPingAPIView(APIView):
             "heartbeat_timeout_minutes": heartbeat_timeout_minutes,
             "heartbeat_timed_out": heartbeat_timed_out,
         })
+        # احسب وقت الانصراف المسموح (من بداية الوردية + السماح) إن توفرت بيانات التعيين
+        try:
+            earliest_checkout = None
+            if assignment is not None:
+                sh = getattr(assignment, "shift", None)
+                if sh is not None:
+                    st = getattr(assignment, "start_time", None) or getattr(sh, "start_time", None)
+                    et = getattr(assignment, "end_time", None) or getattr(sh, "end_time", None)
+                    if st and et:
+                        sdt, edt = AttendanceCheckSerializer._anchor_times(_local_dt(recorded_at), st, et, anchor_date=getattr(assignment, "date", None))
+                        if getattr(assignment, "checkout_grace_hours", None) is not None:
+                            th_min = int(round(float(assignment.checkout_grace_hours) * 60))
+                            earliest_checkout = sdt + timedelta(minutes=th_min)
+                        elif getattr(assignment, "checkout_grace", None) is not None:
+                            th_min = int(assignment.checkout_grace)
+                            earliest_checkout = sdt + timedelta(minutes=th_min)
+                        else:
+                            earliest_checkout = edt
+            if earliest_checkout is not None:
+                monitoring_payload["earliest_checkout_at"] = _local_iso(earliest_checkout)
+        except Exception:
+            pass
 
         # رفض النبضات إذا لا توجد جلسة تتبّع فعّالة عند اختيار البدء بعد الحضور
         if tracking_mode == "check_in" and (not active_attendance):

@@ -680,14 +680,23 @@ class AttendanceCheckSerializer(serializers.Serializer):
                     win_r = min(window_end, grace_end)
                     ok = (win_l <= now_local <= win_r)
                 elif action in ("check_out", "early_check_out"):
-                    if a.checkout_grace_hours is not None:
+                    # تفسير السياسة المطلوبة:
+                    # - إذا تم تحديد سماح الانصراف (بالدقائق أو الساعات)، فإن الانصراف العادي مسموح
+                    #   بعد مرور هذه المدة من بداية الوردية، حتى لو كان قبل وقت نهاية الوردية.
+                    # - إذا تُركت حقول السماح فارغة، يبقى الانصراف العادي منوطًا بنهاية الوردية.
+                    has_hours = (a.checkout_grace_hours is not None)
+                    has_minutes = (a.checkout_grace is not None)
+                    if has_hours:
                         threshold_min = int(round(float(a.checkout_grace_hours) * 60))
-                    elif a.checkout_grace is not None:
+                    elif has_minutes:
                         threshold_min = int(a.checkout_grace)
                     else:
-                        threshold_min = 0
-                    earliest_by_threshold = start_dt + timedelta(minutes=threshold_min)
-                    earliest = max(end_dt, earliest_by_threshold)
+                        threshold_min = None
+                    earliest_by_threshold = (
+                        start_dt + timedelta(minutes=threshold_min)
+                        if threshold_min is not None else None
+                    )
+                    earliest = earliest_by_threshold if earliest_by_threshold is not None else end_dt
                     win_l = earliest
                     win_r = window_end
                     if action == "check_out":
