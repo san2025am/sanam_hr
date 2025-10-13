@@ -65,6 +65,7 @@ from .models import (
     EmployeeShiftAssignment, GeofenceViolationPause,
     UniformItem, UniformDelivery, UniformDeliveryItem,
     ReportMessage,
+    LocationPing,
 )
 
 User = get_user_model()
@@ -1167,17 +1168,41 @@ class ReportSerializer(serializers.ModelSerializer):
         report_type = (validated_data.get("report_type") or "").strip()
         report = super().create(validated_data)
 
+        # سجل أولي: أنشأه الحارس (المرسل = الحارس)
+        try:
+            emp = validated_data.get('employee')
+            if emp is None:
+                # في حال لم يُمرَّر employee ضمن save(), نحاول قراءته من سياق الطلب
+                req = self.context.get('request')
+                if req and getattr(req, 'user', None):
+                    emp = Employee.objects.filter(user=req.user).first()
+            if emp is not None:
+                loc_name = getattr(getattr(report, 'location', None), 'name', '') or '—'
+                ReportMessage.objects.create(
+                    report=report,
+                    sender_employee=emp,
+                    sender_role_name='الحارس',
+                    text=f'تم إنشاء البلاغ من قبل الحارس في موقع: {loc_name}.',
+                    is_instruction=False,
+                    stage='guard',
+                )
+        except Exception:
+            pass
+
         if report_type in ("complaint", "security"):
             report.current_stage = "supervisor"
             report.last_routed_at = dj_tz.now()
             report.save(update_fields=["current_stage", "last_routed_at", "updated_at"])
             try:
+                supervisor = getattr(getattr(report, 'employee', None), 'supervisor', None) or getattr(emp, 'supervisor', None)
+                loc_name = getattr(getattr(report, 'location', None), 'name', '') or '—'
                 ReportMessage.objects.create(
                     report=report,
-                    text="تم توجيه البلاغ إلى المشرف المباشر.",
+                    sender_employee=supervisor,
+                    sender_role_name='المشرف المباشر',
+                    text=(f"تم توجيه البلاغ إلى المشرف: {getattr(supervisor, 'full_name', '—')} @ {loc_name}"),
                     is_instruction=False,
                     stage="supervisor",
-                    sender_role_name="النظام",
                 )
             except Exception:
                 pass
@@ -1221,6 +1246,90 @@ class ReportSerializer(serializers.ModelSerializer):
         if not ref:
             return None
         return int((dj_tz.now() - ref).total_seconds() // 86400)
+
+    # -------- Auto-locate helpers for reports --------
+    def _auto_pick_location(self, *, employee: Employee, lat: float | None = None, lng: float | None = None):
+        """
+        يحاول اختيار موقع البلاغ تلقائيًا:
+        1) عند توفر lat/lng نستخدم أفضل مطابقة عبر حدود/نصف قطر.
+        2) إن لم يتوفر: أقرب/آخر تعيين وردية بموقع محدد.
+        3) إن لم يتوفر: تعيين موقع نشط (EmployeeLocationAssignment بلا end_date).
+        4) إن لم يتوفر: آخر LocationPing ضمن 24 ساعة.
+        """
+        # 1) Active employee-location assignment (الموقع المسند)
+        try:
+            ela = (EmployeeLocationAssignment.objects
+                   .select_related('location')
+                   .filter(employee=employee, end_date__isnull=True)
+                   .order_by('-id')
+                   .first())
+            if ela and ela.location:
+                return ela.location
+        except Exception:
+            pass
+        # 2) Current shift assignment
+        try:
+            assign = (EmployeeShiftAssignment.objects
+                      .select_related('location')
+                      .filter(employee=employee, active=True, location__isnull=False)
+                      .order_by('-date', '-id')
+                      .first())
+            if assign and assign.location:
+                return assign.location
+        except Exception:
+            pass
+        # 3) Geo (عند توفر الإحداثيات)
+        if lat is not None and lng is not None:
+            try:
+                resolver = ResolveLocationSerializer(context=self.context)
+                loc, dist, mode, within = resolver.find_best_location(employee, float(lat), float(lng))
+                if loc:
+                    return loc
+            except Exception:
+                pass
+        # 4) Recent ping within 24h
+        try:
+            from django.utils import timezone as dj_tz
+            since = dj_tz.now() - dj_tz.timedelta(hours=24)
+            ping = (LocationPing.objects
+                    .select_related('location')
+                    .filter(employee=employee, recorded_at__gte=since)
+                    .order_by('-recorded_at')
+                    .first())
+            if ping and ping.location:
+                return ping.location
+        except Exception:
+            pass
+        return None
+
+    def validate(self, attrs):
+        """
+        تعيين الموقع تلقائيًا عند إنشاء التقرير إذا لم يُحدد.
+        يقبل lat/lng اختياريًا ضمن body (إن أُرسلت من العميل).
+        """
+        loc = attrs.get('location')
+        if loc:
+            return attrs
+        req = self.context.get('request')
+        user = getattr(req, 'user', None)
+        if not user:
+            return attrs
+        try:
+            emp = Employee.objects.get(user=user)
+        except Employee.DoesNotExist:
+            return attrs
+        # read optional lat/lng from initial_data
+        try:
+            lat_raw = self.initial_data.get('lat') if hasattr(self, 'initial_data') else None
+            lng_raw = self.initial_data.get('lng') if hasattr(self, 'initial_data') else None
+            lat = float(lat_raw) if lat_raw is not None else None
+            lng = float(lng_raw) if lng_raw is not None else None
+        except Exception:
+            lat = lng = None
+        auto_loc = self._auto_pick_location(employee=emp, lat=lat, lng=lng)
+        if auto_loc is not None:
+            attrs['location'] = auto_loc
+        return attrs
 
 
 class RequestSerializer(serializers.ModelSerializer):
