@@ -305,6 +305,14 @@ class EmployeeMeSerializer(serializers.ModelSerializer):
     # إضافات: قائمة المخالفات وخلاصة تفصيلية للخصومات
     violations = serializers.SerializerMethodField()
     salary_deduction_details = serializers.SerializerMethodField()
+    # حقول إضافية للحساب البنكي للمستفيد والإقامة
+    beneficiary_name = serializers.CharField(read_only=True, allow_null=True)
+    beneficiary_bank_name = serializers.CharField(read_only=True, allow_null=True)
+    beneficiary_iban = serializers.CharField(read_only=True, allow_null=True)
+    beneficiary_relation = serializers.CharField(read_only=True, allow_null=True)
+    residency_number = serializers.CharField(read_only=True, allow_null=True)
+    residency_issue_date = serializers.DateField(read_only=True, allow_null=True)
+    residency_expiry_date = serializers.DateField(read_only=True, allow_null=True)
 
     class Meta:
         model  = Employee
@@ -312,6 +320,8 @@ class EmployeeMeSerializer(serializers.ModelSerializer):
             "id", "username", "email", "role", "role_label",
             "full_name", "national_id", "phone_number",
             "hire_date", "bank_name", "bank_account",
+            "beneficiary_name", "beneficiary_bank_name", "beneficiary_iban", "beneficiary_relation",
+            "residency_number", "residency_issue_date", "residency_expiry_date",
             "id_expiry_date", "date_of_birth_gregorian",
             "employee_instructions", "location_instructions",
             "supervisor_name", "supervisor_phone",

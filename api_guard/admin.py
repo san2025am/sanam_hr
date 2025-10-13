@@ -176,7 +176,13 @@ class EmployeeAdmin(ImportExportModelAdmin):
                        'id_expiry_date', 'id_image')
         }),
         ('العمل', {'fields': ('hire_date',)}),
-        ('البنك والراتب', {'fields': ('bank_name', 'bank_account')}),
+        ('البنك والراتب', {'fields': (
+            'bank_name', 'bank_account',
+            'beneficiary_name', 'beneficiary_bank_name', 'beneficiary_iban', 'beneficiary_relation',
+        )}),
+        ('الإقامة (اختياري)', {'fields': (
+            'residency_number', 'residency_issue_date', 'residency_expiry_date', 'residency_image'
+        )}),
         ('الإجازات', {'fields': ('monthly_leave_quota_hours',)}),
         ('تعليمات', {'fields': ('instructions',)}),
     )

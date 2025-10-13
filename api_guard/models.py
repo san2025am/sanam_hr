@@ -110,6 +110,20 @@ class Employee(BaseModel):
     )
     bank_account = models.CharField(max_length=50, blank=True, null=True, verbose_name="رقم الحساب / الآيبان")
 
+    # بيانات حساب بنكي لطرف آخر (مستفيد) — اختياري
+    beneficiary_name = models.CharField(max_length=255, blank=True, null=True, verbose_name="اسم صاحب الحساب (مستفيد)")
+    beneficiary_bank_name = models.CharField(
+        max_length=20, choices=SAUDI_BANK_CHOICES, null=True, blank=True, verbose_name="بنك المستفيد"
+    )
+    beneficiary_iban = models.CharField(max_length=34, blank=True, null=True, verbose_name="رقم الآيبان للمستفيد")
+    beneficiary_relation = models.CharField(max_length=50, blank=True, null=True, verbose_name="صلة القرابة")
+
+    # بيانات الإقامة (لغير السعوديين) — اختياري
+    residency_number = models.CharField(max_length=20, blank=True, null=True, verbose_name="رقم الإقامة")
+    residency_issue_date = models.DateField(blank=True, null=True, verbose_name="تاريخ إصدار الإقامة")
+    residency_expiry_date = models.DateField(blank=True, null=True, verbose_name="تاريخ انتهاء الإقامة")
+    residency_image = models.ImageField(upload_to='residencies/', blank=True, null=True, verbose_name="صورة الإقامة")
+
     monthly_leave_quota_hours = models.DecimalField(
         max_digits=6,
         decimal_places=2,
