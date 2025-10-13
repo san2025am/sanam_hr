@@ -8,23 +8,17 @@
 
 {% block title %}إدارة سنم{% endblock %}
 
-{% block extrastyle %}
-  {{ block.super }}
-  <link rel="stylesheet" href="{% static 'admin_extras/css/brand.css' %}">
-  <link rel="stylesheet" href="{% static 'admin_extras/css/base.css' %}">
-  <style>:root{--brand-logo-url:url('{% static 'admin_extras/img/logo.png' %}');}</style>
-{% endblock %}
+{#
+  ملاحظة: لتجنب تعارضات غير مقصودة مع صفحات Django Admin القياسية،
+  لا نقوم بتحميل أي ملفات CSS عالمية هنا. صفحات admin_extras المخصصة
+  (dashboard/chat) تُحمّل أنماطها ضمن قوالبها الخاصة فقط.
+  صفحة تسجيل الدخول ما زالت تستخدم تصميم العلامة من خلال login.html.
+ #}
 
 {% block branding %}
   <div id="site-name"><a href="{% url 'admin:index' %}">إدارة سنم</a></div>
 {% endblock %}
 
-{% block nav-global %}
-  <button id="theme-toggle" class="btn btn-sm" title="تبديل الثيم">🌓</button>
-{% endblock %}
+{# نترك شريط الأدوات الافتراضي كما هو #}
 
-{% block extrahead %}
-  {{ block.super }}
-  <script src="{% static 'admin_extras/js/theme-toggle.js' %}"></script>
-{% endblock %}
-
+{# لا سكربتات عامة هنا لتجنب التأثير على كامل اللوحة #}

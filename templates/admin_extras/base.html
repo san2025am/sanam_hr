@@ -3,23 +3,23 @@
 
 {% block extrastyle %}
   {{ block.super }}
+  {# تم إيقاف تحميل أنماط العلامة عالميًا لتجنب التعارضات. إن رغبت،
+     يمكنك تفعيلها بإزالة التعليق عن السطور التالية: #}
+  {#
   <link rel="stylesheet" href="{% static 'admin_extras/css/brand.css' %}">
   <link rel="stylesheet" href="{% static 'admin_extras/css/base.css' %}">
   <style>:root{--brand-logo-url:url('{% static 'admin_extras/img/logo.png' %}');}</style>
+  #}
   {% block page_css %}{% endblock %}
 {% endblock %}
 
 {% block content %}
-  <div class="admin-extras-toolbar">
-    <button type="button" id="theme-toggle" class="btn btn-sm btn-primary" aria-label="Toggle theme">🌓</button>
-  </div>
+  {# شريط أدوات بسيط بدون مبدّل الثيم افتراضيًا #}
   {% block page_content %}{% endblock %}
 {% endblock %}
 
 {% block extrahead %}
   {{ block.super }}
   {% block page_head %}{% endblock %}
-  {# تحميل سكربتات الصفحة هنا لضمان توفرها دائماً #}
   {% block page_js %}{% endblock %}
-  <script src="{% static 'admin_extras/js/theme-toggle.js' %}"></script>
 {% endblock %}
