@@ -64,6 +64,7 @@ from .models import (
     UniformItem, UniformDelivery, UniformDeliveryItem, PasswordResetSMS,
     EmployeeShiftAssignment, GeofenceViolationPause,
     UniformItem, UniformDelivery, UniformDeliveryItem,
+    ReportMessage,
 )
 
 User = get_user_model()
@@ -1081,6 +1082,25 @@ class ReportAttachmentSerializer(serializers.ModelSerializer):
         return request.build_absolute_uri(url) if request else url
 
 
+class ReportMessageSerializer(serializers.ModelSerializer):
+    """عنصر في سجل التقرير (تعليمات/ملاحظات)."""
+    sender_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ReportMessage
+        fields = [
+            "id", "text", "is_instruction", "stage", "created_at", "sender_name", "sender_role_name"
+        ]
+        read_only_fields = fields
+
+    def get_sender_name(self, obj):
+        if obj.sender_employee:
+            return obj.sender_employee.full_name
+        if obj.sender_user:
+            return obj.sender_user.get_username()
+        return "النظام"
+
+
 class ReportSerializer(serializers.ModelSerializer):
     location = serializers.PrimaryKeyRelatedField(
         queryset=Location.objects.all(), allow_null=True, required=False
@@ -1097,6 +1117,13 @@ class ReportSerializer(serializers.ModelSerializer):
         help_text="قائمة ملفات (صور/فيديو) مرفقة مع التقرير",
     )
 
+    # حقول إضافية لواجهة المتابعة والتصعيد
+    current_stage = serializers.CharField(read_only=True)
+    can_escalate = serializers.SerializerMethodField()
+    last_update_at = serializers.SerializerMethodField()
+    days_since_update = serializers.SerializerMethodField()
+    timeline = ReportMessageSerializer(many=True, read_only=True)
+
     class Meta:
         model = Report
         fields = [
@@ -1112,6 +1139,7 @@ class ReportSerializer(serializers.ModelSerializer):
             "location_name",
             "attachments",
             "upload_attachments",
+            "current_stage", "can_escalate", "last_update_at", "days_since_update", "timeline",
         ]
         read_only_fields = [
             "id",
@@ -1121,6 +1149,7 @@ class ReportSerializer(serializers.ModelSerializer):
             "closed_at",
             "location_name",
             "attachments",
+            "current_stage", "can_escalate", "last_update_at", "days_since_update", "timeline",
         ]
 
     def validate_upload_attachments(self, files):
@@ -1132,8 +1161,26 @@ class ReportSerializer(serializers.ModelSerializer):
         return files
 
     def create(self, validated_data):
+        # عند إنشاء شكوى/حالة أمنية: ابدأ مرحلة "المشرف" وسجّل ملاحظة نظام
+        from django.utils import timezone as dj_tz
         attachments = validated_data.pop("upload_attachments", [])
+        report_type = (validated_data.get("report_type") or "").strip()
         report = super().create(validated_data)
+
+        if report_type in ("complaint", "security"):
+            report.current_stage = "supervisor"
+            report.last_routed_at = dj_tz.now()
+            report.save(update_fields=["current_stage", "last_routed_at", "updated_at"])
+            try:
+                ReportMessage.objects.create(
+                    report=report,
+                    text="تم توجيه البلاغ إلى المشرف المباشر.",
+                    is_instruction=False,
+                    stage="supervisor",
+                    sender_role_name="النظام",
+                )
+            except Exception:
+                pass
         for uploaded in attachments:
             ReportAttachment.objects.create(
                 report=report,
@@ -1148,6 +1195,32 @@ class ReportSerializer(serializers.ModelSerializer):
         if content_type.startswith("video/"):
             return "video"
         return "image"
+
+    # --- Helpers ---
+    def get_can_escalate(self, obj):
+        from django.utils import timezone as dj_tz
+        if obj.report_type not in ("complaint", "security"):
+            return False
+        # يظهر زر التصعيد فقط عندما يكون في مرحلة الموارد البشرية ومرّ أكثر من 48 ساعة دون رد
+        if (obj.current_stage or "") != "hr":
+            return False
+        if (obj.status or "") not in ("new",):
+            return False
+        ref = obj.last_response_at or obj.last_routed_at or obj.created_at
+        if not ref:
+            return False
+        return (dj_tz.now() - ref).total_seconds() >= 48 * 3600
+
+    def get_last_update_at(self, obj):
+        ref = obj.last_response_at or obj.updated_at or obj.created_at
+        return ref.isoformat() if ref else None
+
+    def get_days_since_update(self, obj):
+        from django.utils import timezone as dj_tz
+        ref = obj.last_response_at or obj.updated_at or obj.created_at
+        if not ref:
+            return None
+        return int((dj_tz.now() - ref).total_seconds() // 86400)
 
 
 class RequestSerializer(serializers.ModelSerializer):
@@ -1236,9 +1309,19 @@ class RequestSerializer(serializers.ModelSerializer):
                 if quantity <= 0:
                     raise serializers.ValidationError({'uniform_items': f"الكمية يجب أن تكون أكبر من صفر (العنصر رقم {idx + 1})."})
 
+                # المقاس (اختياري)
+                raw_size = item.get('size')
+                size = None
+                if raw_size is not None:
+                    s = str(raw_size).strip()
+                    if len(s) > 20:
+                        raise serializers.ValidationError({'uniform_items': f"المقاس طويل جداً (العنصر رقم {idx + 1})."})
+                    size = s or None
+
                 cleaned_items.append({
                     'item_id': item_id,
                     'quantity': quantity,
+                    'size': size,
                     'notes': (item.get('notes') or '').strip(),
                 })
 
@@ -1294,6 +1377,7 @@ class RequestSerializer(serializers.ModelSerializer):
                         delivery=uniform_delivery,
                         item=uniform_item,
                         quantity=item_data['quantity'],
+                        size=item_data.get('size') or None,
                         notes=item_data['notes'] or '',
                     )
                     total_value += delivery_item.value
@@ -1329,6 +1413,7 @@ class RequestSerializer(serializers.ModelSerializer):
                     'item_id': str(item.item_id),
                     'item_name': item.item.name,
                     'quantity': item.quantity,
+                    'size': item.size or '',
                     'value': str(item.value),
                     'notes': item.notes or '',
                 }

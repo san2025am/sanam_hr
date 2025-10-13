@@ -19,6 +19,7 @@ from .models import (
     UniformItem, UniformDelivery, UniformDeliveryItem,
     TrustedDevice, DeviceLoginChallenge
 )
+from .models import ReportMessage, TaskUpdateLog
 try:
     from .resources import EmployeeResource, LocationResource, ReportResource, RequestResource
     _HAS_IMPORT_EXPORT = True
@@ -50,6 +51,14 @@ class ReportAttachmentInline(admin.TabularInline):
     extra = 1
     verbose_name = "مرفق"
     verbose_name_plural = "المرفقات"
+
+class ReportMessageInline(admin.TabularInline):
+    """إتاحة إضافة تعليمات/ملاحظات للبلاغ من لوحة الإدارة."""
+    model = ReportMessage
+    extra = 1
+    verbose_name = "تعليمات/ملاحظة"
+    verbose_name_plural = "سجل التعليمات"
+    fields = ("text", "is_instruction", "sender_employee", "sender_user", "sender_role_name", "stage")
 
 class UniformDeliveryItemInline(admin.TabularInline):
     model = UniformDeliveryItem
@@ -310,10 +319,30 @@ class GeofenceViolationPauseAdmin(admin.ModelAdmin):
 
 @admin.register(Task)
 class TaskAdmin(admin.ModelAdmin):
-    list_display = ('title', 'assigned_to', 'location', 'status', 'due_date')
-    list_filter = ('status', 'location', 'assigned_to')
+    # عرض اسم الحارس، الموقع، الحالة، وآخر تحديث/ملاحظة
+    list_display = ('title', 'assigned_to', 'location', 'status', 'due_date', 'last_update_summary')
+    list_filter = ('status', 'location', 'assigned_to', 'due_date')
     search_fields = ('title', 'description', 'assigned_to__full_name')
     autocomplete_fields = ('assigned_by', 'assigned_to', 'location')
+
+    class TaskUpdateLogInline(admin.TabularInline):
+        model = TaskUpdateLog
+        extra = 0
+        readonly_fields = ('created_at',)
+
+    inlines = [TaskUpdateLogInline]
+
+    def last_update_summary(self, obj):
+        """آخر تحديث مع ملاحظة مختصرة للعرض السريع."""
+        upd = obj.updates.order_by('-created_at').first()
+        if not upd:
+            return '-'
+        who = upd.employee.full_name if upd.employee else '—'
+        note = (upd.note or '').strip()
+        if len(note) > 30:
+            note = note[:27] + '...'
+        return f"{upd.created_at:%Y-%m-%d %H:%M} — {who} — {upd.new_status}{(' — ' + note) if note else ''}"
+    last_update_summary.short_description = 'آخر تحديث'
 # api_guard/admin.py
 
 @admin.register(Shift)
@@ -370,7 +399,8 @@ class ReportAdmin(ImportExportModelAdmin):
     list_display = ('employee', 'report_type', 'location', 'status', 'created_at')
     list_filter = ('status', 'report_type', 'location')
     search_fields = ('employee__full_name', 'description')
-    inlines = [ReportAttachmentInline]
+    # إظهار المرفقات وسجل التعليمات ضمن التقرير
+    inlines = [ReportAttachmentInline, ReportMessageInline]
     autocomplete_fields = ('employee', 'location')
 
 @admin.register(Request)

@@ -362,11 +362,14 @@ class EmployeeLocationAssignment(BaseModel):
 
 
 class Task(BaseModel):
+    # تم توسيع حالات المهمة لدعم "مؤجلة" و"غير ممكن" — مع إبقاء القديم للتوافق
     STATUS_CHOICES = [
         ('new', 'جديدة'),
         ('accepted', 'مقبولة'),
         ('in_progress', 'قيد التنفيذ'),
-        ('completed', 'مكتملة'),
+        ('completed', 'منجزة'),
+        ('deferred', 'مؤجلة'),
+        ('impossible', 'غير ممكن'),
     ]
 
     title = models.CharField(max_length=200, verbose_name="عنوان المهمة")
@@ -385,6 +388,26 @@ class Task(BaseModel):
         verbose_name = "5. مهمة"
         verbose_name_plural = "5. المهام"
         ordering = ['-due_date']
+
+
+class TaskUpdateLog(BaseModel):
+    """سجلّ تحديثات حالات المهام مع ملاحظات الحارس."""
+    task = models.ForeignKey(Task, on_delete=models.CASCADE, related_name='updates', verbose_name='المهمة')
+    employee = models.ForeignKey(Employee, on_delete=models.SET_NULL, null=True, blank=True, related_name='task_updates', verbose_name='الموظف')
+    location = models.ForeignKey(Location, on_delete=models.SET_NULL, null=True, blank=True, related_name='task_updates', verbose_name='الموقع')
+    old_status = models.CharField(max_length=20, blank=True, null=True, verbose_name='الحالة القديمة')
+    new_status = models.CharField(max_length=20, verbose_name='الحالة الجديدة')
+    note = models.TextField(blank=True, null=True, verbose_name='ملاحظة الحارس')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='وقت التعديل')
+
+    def __str__(self):
+        who = self.employee.full_name if self.employee else 'غير محدد'
+        return f"تحديث مهمة #{self.task_id} -> {self.new_status} بواسطة {who}"
+
+    class Meta:
+        verbose_name = 'سجل تحديث مهمة'
+        verbose_name_plural = 'سجل تحديثات المهام'
+        ordering = ['-created_at']
 
 
 class Shift(BaseModel):
@@ -651,6 +674,25 @@ class Report(BaseModel):
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="وقت الإنشاء")
     closed_at = models.DateTimeField(null=True, blank=True, verbose_name="وقت الإغلاق")
 
+    # ======= Workflow fields for complaints / security reports =======
+    # المرحلة الحالية للتوجيه: المشرف ← الموارد البشرية ← الإدارة العليا
+    STAGE_CHOICES = [
+        ('supervisor', 'المشرف'),
+        ('hr', 'الموارد البشرية'),
+        ('executive', 'الإدارة العليا'),
+    ]
+    current_stage = models.CharField(
+        max_length=20,
+        choices=STAGE_CHOICES,
+        null=True,
+        blank=True,
+        verbose_name='المرحلة الحالية'
+    )
+    # آخر وقت تم فيه توجيه البلاغ (تلقائيًا أو يدويًا)
+    last_routed_at = models.DateTimeField(null=True, blank=True, verbose_name='آخر وقت توجيه')
+    # آخر وقت استجابة من الجهة المختصة (لتحديد الساعات المنقضية)
+    last_response_at = models.DateTimeField(null=True, blank=True, verbose_name='آخر وقت رد')
+
     def __str__(self): return f"تقرير {self.get_report_type_display()} من {self.employee.full_name}"
 
     class Meta:
@@ -672,6 +714,46 @@ class ReportAttachment(BaseModel):
     class Meta:
         verbose_name = "مرفق تقرير"
         verbose_name_plural = "مرفقات التقارير"
+
+
+class ReportMessage(BaseModel):
+    """
+    سجل زمني/تعليمات للبلاغ — يُعرض للحارس ضمن "تعليمات الجهة المختصة".
+    """
+    report = models.ForeignKey(Report, on_delete=models.CASCADE, related_name='timeline', verbose_name="التقرير")
+    sender_user = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='sent_report_messages', verbose_name='المستخدم المرسل')
+    sender_employee = models.ForeignKey(Employee, on_delete=models.SET_NULL, null=True, blank=True, related_name='sent_report_messages', verbose_name='الموظف المرسل')
+    sender_role_name = models.CharField(max_length=100, blank=True, null=True, verbose_name='دور المرسل')
+    text = models.TextField(verbose_name='النص/التعليمات')
+    is_instruction = models.BooleanField(default=True, verbose_name='تعليمات للحارس؟')
+    stage = models.CharField(max_length=20, choices=Report.STAGE_CHOICES, blank=True, null=True, verbose_name='مرحلة الإرسال')
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name='وقت الإرسال')
+
+    def __str__(self):
+        who = self.sender_employee.full_name if self.sender_employee else (self.sender_user.username if self.sender_user else 'نظام')
+        return f"رسالة تقرير #{self.report_id} من {who}"
+
+    class Meta:
+        verbose_name = 'تعليمات/ملاحظة تقرير'
+        verbose_name_plural = 'تعليمات وملاحظات التقارير'
+        ordering = ['created_at']
+
+
+@receiver(post_save, sender=ReportMessage)
+def update_report_last_response(sender, instance: ReportMessage, created, **kwargs):
+    """عند وصول تعليمات فعلية من جهة مختصة نحدّث آخر وقت رد للتقرير."""
+    if not created:
+        return
+    if not instance.is_instruction:
+        return
+    try:
+        r = instance.report
+        r.last_response_at = instance.created_at
+        if instance.stage:
+            r.current_stage = instance.stage
+        r.save(update_fields=['last_response_at', 'current_stage', 'updated_at'])
+    except Exception:
+        pass
 
 
 class Request(BaseModel):
@@ -903,6 +985,8 @@ class UniformDeliveryItem(BaseModel):
     delivery = models.ForeignKey(UniformDelivery, on_delete=models.CASCADE, related_name='items', verbose_name="نموذج الاستلام")
     item = models.ForeignKey(UniformItem, on_delete=models.CASCADE, verbose_name="القطعة")
     quantity = models.PositiveIntegerField(default=1, verbose_name="الكمية")
+    # مقاس الزي (اختياري): XS, S, M, L, XL, XXL ... أو نص حر قصير
+    size = models.CharField(max_length=20, blank=True, null=True, verbose_name="المقاس")
     value = models.DecimalField(max_digits=10, decimal_places=2, verbose_name="القيمة")
     notes = models.CharField(max_length=255, blank=True, null=True, verbose_name="ملاحظات")
 

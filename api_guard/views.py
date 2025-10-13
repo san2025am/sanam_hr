@@ -45,6 +45,7 @@ from .models import (
     Salary,
     Task,
     Report,
+    ReportMessage,
     Request,
     Advance,
     TrustedDevice,
@@ -57,6 +58,7 @@ from .models import (
     EmployeeShiftAssignment,
     Shift,
     GeofenceViolationPause,
+    TaskUpdateLog,
 )
 
 from .serializers import (
@@ -2227,15 +2229,77 @@ class GuardReportListCreateView(OptimizedQuerysetMixin, APIView):
         """
         - إن كان body يحتوي حقول إنشاء -> إنشاء تقرير
         - إن كان body فارغ أو فيه {list:true} -> إرجاع قائمة تقاريري
+        - إن كان action = escalate -> تصعيد تقرير مؤهل للإدارة العليا
         """
         employee = _require_guard_employee(request.user)
-        is_list = (request.data.get("list") is True) or (not request.data) or (request.data.get("action") == "list")
+        action = (request.data.get("action") or '').strip().lower() if request.data else ''
+        is_list = (request.data.get("list") is True) or (not request.data) or (action == "list")
+
+        # ---- Escalation action (زر التصعيد) ----
+        if action == 'escalate':
+            rid = request.data.get('id') or request.data.get('report_id')
+            if not rid:
+                return Response({"detail": "معرّف التقرير مفقود"}, status=status.HTTP_400_BAD_REQUEST)
+            try:
+                report = Report.objects.select_related('employee').get(id=rid, employee=employee)
+            except Report.DoesNotExist as exc:
+                raise NotFound("التقرير غير موجود") from exc
+
+            # السماح بالتصعيد فقط وفق الشروط: شكوى/أمنية + مرحلة HR + أكثر من 48 ساعة + حالة انتظار
+            if report.report_type not in ("complaint", "security"):
+                return Response({"detail": "لا يمكن تصعيد هذا النوع من التقارير."}, status=status.HTTP_400_BAD_REQUEST)
+            if (report.current_stage or '') != 'hr' or (report.status or '') not in ("new",):
+                return Response({"detail": "التقرير غير مؤهل للتصعيد.", "reason": "WRONG_STAGE_OR_STATUS"}, status=status.HTTP_400_BAD_REQUEST)
+            ref = report.last_response_at or report.last_routed_at or report.created_at
+            if not ref:
+                return Response({"detail": "لا مرجع زمني للتصعيد."}, status=status.HTTP_400_BAD_REQUEST)
+            if (dj_timezone.now() - ref).total_seconds() < 48 * 3600:
+                return Response({"detail": "لم تمضِ 48 ساعة بعد."}, status=status.HTTP_400_BAD_REQUEST)
+
+            report.current_stage = 'executive'
+            report.status = 'escalated'
+            report.last_routed_at = dj_timezone.now()
+            report.save(update_fields=['current_stage', 'status', 'last_routed_at', 'updated_at'])
+            try:
+                ReportMessage.objects.create(
+                    report=report,
+                    text="تم التصعيد للإدارة العليا بطلب المستخدم بعد تأخر الرد من الموارد.",
+                    is_instruction=False,
+                    stage='executive',
+                    sender_role_name='النظام',
+                )
+            except Exception:
+                pass
+            return Response(ReportSerializer(report).data, status=status.HTTP_200_OK)
         if is_list:
             qs = (Report.objects
                   .filter(employee=employee)
                   .select_related("location")
-                  .prefetch_related("attachments")
+                  .prefetch_related("attachments", "timeline")
                   .order_by("-created_at"))
+
+            # توجيه تلقائي للبلاغات العالقة لدى المشرف بعد 48 ساعة إلى الموارد
+            for r in qs:
+                try:
+                    if r.report_type in ("complaint", "security") and (r.current_stage or '') in ('', 'supervisor') and (r.status or '') in ("new",):
+                        ref = r.last_response_at or r.last_routed_at or r.created_at
+                        if ref and (dj_timezone.now() - ref).total_seconds() >= 48 * 3600:
+                            r.current_stage = 'hr'
+                            r.last_routed_at = dj_timezone.now()
+                            r.save(update_fields=['current_stage', 'last_routed_at', 'updated_at'])
+                            try:
+                                ReportMessage.objects.create(
+                                    report=r,
+                                    text="تم تحويل البلاغ تلقائيًا إلى الموارد البشرية بعد تأخر رد المشرف (48 ساعة).",
+                                    is_instruction=False,
+                                    stage='hr',
+                                    sender_role_name='النظام',
+                                )
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+
             data = ReportSerializer(qs, many=True).data
             return Response({"results": data}, status=status.HTTP_200_OK)
 
@@ -2330,20 +2394,13 @@ class GuardTaskUpdateView(OptimizedQuerysetMixin, APIView):
         new_status = serializer.validated_data['status']
         status_note = serializer.validated_data.get('status_note') or ''
 
-        if new_status not in TASK_STATUS_FLOW:
+        # السماح بتحديث الحالة لأي قيمة معتمدة (مع تحقق بسيط لحالات خاصة)
+        allowed_statuses = {choice[0] for choice in Task.STATUS_CHOICES}
+        if new_status not in allowed_statuses:
             return Response({"detail": "الحالة الجديدة غير مدعومة."}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            current_index = TASK_STATUS_FLOW.index(task.status)
-            target_index = TASK_STATUS_FLOW.index(new_status)
-        except ValueError:
-            return Response({"detail": "لا يمكن تحديث هذه المهمة."}, status=status.HTTP_400_BAD_REQUEST)
-
-        if target_index < current_index:
-            return Response({"detail": "لا يمكن الرجوع إلى حالة سابقة."}, status=status.HTTP_400_BAD_REQUEST)
-
-        if target_index > current_index + 1:
-            return Response({"detail": "يجب تحديث حالة المهمة بالتسلسل."}, status=status.HTTP_400_BAD_REQUEST)
+        # حالة "غير ممكن" تتطلب سببًا
+        if new_status == 'impossible' and not (status_note or '').strip():
+            return Response({"detail": "الرجاء كتابة سبب عدم إمكانية التنفيذ."}, status=status.HTTP_400_BAD_REQUEST)
 
         updated_fields = []
         if task.status != new_status:
@@ -2355,8 +2412,22 @@ class GuardTaskUpdateView(OptimizedQuerysetMixin, APIView):
             updated_fields.append('status_note')
 
         if updated_fields:
+            old_status = (set(['status']) - set(updated_fields)) and task.status or None  # لا نحتاجه هنا لاحقًا
             updated_fields.append('updated_at')
             task.save(update_fields=updated_fields)
+
+        # سجل زمني لتحديث المهمة (يربط تلقائيًا بالحارس والموقع)
+        try:
+            TaskUpdateLog.objects.create(
+                task=task,
+                employee=employee,
+                location=task.location,
+                old_status=None,  # يمكن تحسينها بقراءة قبل الحفظ إن لزم
+                new_status=task.status,
+                note=(status_note or '').strip() or None,
+            )
+        except Exception:
+            pass
 
         return Response(TaskMiniSerializer(task).data, status=status.HTTP_200_OK)
 
