@@ -403,6 +403,44 @@ class ReportAdmin(ImportExportModelAdmin):
     inlines = [ReportAttachmentInline, ReportMessageInline]
     autocomplete_fields = ('employee', 'location')
 
+    def save_formset(self, request, form, formset, change):
+        """ملء تلقائي لحقول سجل التعليمات أثناء الحفظ من لوحة الإدارة.
+        - يعين المستخدم المرسل/الموظف المرسل من request في حال تركت فارغة
+        - يحدد دور المرسل ومرحلة الإرسال من الدور
+        """
+        instances = formset.save(commit=False)
+        for obj in instances:
+            try:
+                if isinstance(obj, ReportMessage):
+                    # sender_user/employee defaults
+                    if not obj.sender_user:
+                        obj.sender_user = request.user
+                    if not obj.sender_employee and hasattr(request.user, 'employee'):
+                        try:
+                            obj.sender_employee = request.user.employee
+                        except Exception:
+                            pass
+                    # role label
+                    if not (obj.sender_role_name and str(obj.sender_role_name).strip()):
+                        role = getattr(request.user, 'role', None)
+                        if role:
+                            obj.sender_role_name = str(role)
+                    # stage from role
+                    if not obj.stage and getattr(request.user, 'role', None):
+                        rn = (getattr(request.user.role, 'name', '') or '').strip().lower()
+                        if rn == 'guard':
+                            obj.stage = 'guard'
+                        elif rn == 'supervisor':
+                            obj.stage = 'supervisor'
+                        elif rn in {'hr', 'human_resources'}:
+                            obj.stage = 'hr'
+                        elif rn in {'ops_manager', 'manager', 'executive', 'admin'}:
+                            obj.stage = 'executive'
+            except Exception:
+                pass
+            obj.save()
+        formset.save_m2m()
+
 @admin.register(Request)
 class RequestAdmin(ImportExportModelAdmin):
     if RequestResource:

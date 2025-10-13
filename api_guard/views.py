@@ -78,7 +78,13 @@ from .serializers import (
     GuardTaskUpdateSerializer,
 )
 
-from .emailer import send_email_otp, notify_geofence_violation
+from .emailer import (
+    send_email_otp,
+    notify_geofence_violation,
+    notify_report_created_for_supervisor,
+    notify_report_routed_to_hr,
+    notify_report_escalated_to_exec,
+)
 from .services.attendance import (
     close_stale_attendance_for_employee,
     flag_absent_assignments_for_employee,
@@ -2268,6 +2274,10 @@ class GuardReportListCreateView(OptimizedQuerysetMixin, APIView):
                     stage='executive',
                     sender_role_name='النظام',
                 )
+                try:
+                    notify_report_escalated_to_exec(report=report)
+                except Exception:
+                    logger_api.info("Failed to notify exec for report escalation", exc_info=True)
             except Exception:
                 pass
             return Response(ReportSerializer(report).data, status=status.HTTP_200_OK)
@@ -2295,6 +2305,10 @@ class GuardReportListCreateView(OptimizedQuerysetMixin, APIView):
                                     stage='hr',
                                     sender_role_name='النظام',
                                 )
+                                try:
+                                    notify_report_routed_to_hr(report=r)
+                                except Exception:
+                                    logger_api.info("Failed to notify HR for report route", exc_info=True)
                             except Exception:
                                 pass
                 except Exception:
@@ -2306,8 +2320,13 @@ class GuardReportListCreateView(OptimizedQuerysetMixin, APIView):
         ser = ReportSerializer(data=request.data, context={"request": request})
         ser.is_valid(raise_exception=True)
         with transaction.atomic():
-            ser.save(employee=employee)
-        return Response(ser.data, status=status.HTTP_201_CREATED)
+            report = ser.save(employee=employee)
+        # notify supervisor for a new report
+        try:
+            notify_report_created_for_supervisor(report=report, employee=employee)
+        except Exception:
+            logger_api.info("Failed to notify supervisor for report create", exc_info=True)
+        return Response(ReportSerializer(report).data, status=status.HTTP_201_CREATED)
 
 
 class GuardRequestListCreateView(OptimizedQuerysetMixin, APIView):

@@ -756,6 +756,60 @@ def update_report_last_response(sender, instance: ReportMessage, created, **kwar
         pass
 
 
+@receiver(pre_save, sender=ReportMessage)
+def autofill_reportmessage_sender(sender, instance: ReportMessage, **kwargs):
+    """
+    تعبئة تلقائية لحقول سجل التعليمات عند الحفظ:
+    - لو تم تحديد الموظف المرسل فقط → نملأ المستخدم المرسل من employee.user
+    - نملأ دور المرسل باسم الدور المقروء إن كان فارغًا
+    - نحدد المرحلة stage من الدور: guard→guard، supervisor→supervisor، hr→hr، ops_manager/إداري→executive
+    """
+    try:
+        # 1) ربط المستخدم عند اختيار الموظف
+        if instance.sender_employee and not instance.sender_user:
+            usr = getattr(instance.sender_employee, 'user', None)
+            if usr:
+                instance.sender_user = usr
+
+        # 2) اسم الدور المقروء
+        if not (instance.sender_role_name and str(instance.sender_role_name).strip()):
+            role = None
+            if instance.sender_user and getattr(instance.sender_user, 'role', None):
+                role = instance.sender_user.role
+            elif instance.sender_employee and getattr(instance.sender_employee, 'user', None) and getattr(instance.sender_employee.user, 'role', None):
+                role = instance.sender_employee.user.role
+            if role:
+                try:
+                    instance.sender_role_name = str(role)
+                except Exception:
+                    instance.sender_role_name = getattr(role, 'name', None)
+
+        # 3) تحديد المرحلة stage من الدور إن كانت فارغة
+        if not instance.stage:
+            role_name = None
+            try:
+                role_name = getattr(getattr(instance.sender_user, 'role', None), 'name', None)
+            except Exception:
+                pass
+            if not role_name and instance.sender_employee and getattr(instance.sender_employee, 'user', None):
+                role_name = getattr(getattr(instance.sender_employee.user, 'role', None), 'name', None)
+            rn = (role_name or '').strip().lower()
+            stage = None
+            if rn in {'guard'}:
+                stage = 'guard'
+            elif rn in {'supervisor'}:
+                stage = 'supervisor'
+            elif rn in {'hr', 'human_resources'}:
+                stage = 'hr'
+            elif rn in {'ops_manager', 'manager', 'executive', 'admin'}:
+                stage = 'executive'
+            if stage:
+                instance.stage = stage
+    except Exception:
+        # لا نعطّل الحفظ عند الفشل
+        pass
+
+
 class Request(BaseModel):
     REQUEST_TYPE_CHOICES = [
         ('coverage', 'تغطية'),
