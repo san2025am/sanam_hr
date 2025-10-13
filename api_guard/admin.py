@@ -262,14 +262,23 @@ class LocationMonitoringConfigAdmin(admin.ModelAdmin):
         "is_active",
         "ping_interval_seconds",
         "violation_grace_minutes",
+        "reject_outside_geofence",
+        "heartbeat_timeout_minutes",
+        "tracking_start_mode",
         "violation_rule",
     )
-    list_filter = ("is_active", "violation_rule")
+    list_filter = ("is_active", "violation_rule", "reject_outside_geofence")
     search_fields = ("location__name", "location__client_name")
     autocomplete_fields = ("location", "violation_rule")
     fieldsets = (
         (None, {"fields": ("location", "is_active")}),
-        ("التتبع", {"fields": ("ping_interval_seconds", "violation_grace_minutes")}),
+        ("التتبع", {"fields": (
+            "ping_interval_seconds",
+            "violation_grace_minutes",
+            "reject_outside_geofence",
+            "heartbeat_timeout_minutes",
+            "tracking_start_mode",
+        )}),
         ("المخالفة", {"fields": ("violation_rule", "notes")}),
     )
 

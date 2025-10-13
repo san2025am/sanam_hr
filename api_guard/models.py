@@ -180,6 +180,27 @@ class LocationMonitoringConfig(BaseModel):
         verbose_name="مدة السماح قبل تسجيل المخالفة (دقائق)",
         help_text="إذا تجاوز الابتعاد هذه المدة تُنشأ مخالفة تلقائيًا.",
     )
+    reject_outside_geofence = models.BooleanField(
+        default=False,
+        verbose_name="رفض النبضات خارج النطاق",
+        help_text="إن فُعِّل سيتم رفض أي نبضة خارج الحدود الجغرافية مع كود OUT_OF_GEOFENCE.",
+    )
+    heartbeat_timeout_minutes = models.PositiveIntegerField(
+        default=0,
+        verbose_name="مهلة انقطاع النبضات (دقائق)",
+        help_text="اعتبر التتبع متوقفًا تلقائيًا عند عدم وصول نبضات لهذه المدة (0 = تعطيل)",
+    )
+    TRACKING_START_CHOICES = (
+        ("check_in", "يبدأ من تسجيل الحضور"),
+        ("shift_start", "يبدأ من بداية الوردية"),
+    )
+    tracking_start_mode = models.CharField(
+        max_length=20,
+        choices=TRACKING_START_CHOICES,
+        default="check_in",
+        verbose_name="متى يبدأ التتبّع",
+        help_text="اختر ما إذا كان التتبّع يبدأ من بداية الوردية أو بعد تسجيل الحضور.",
+    )
     violation_rule = models.ForeignKey(
         'api_guard.ViolationRule',
         on_delete=models.PROTECT,

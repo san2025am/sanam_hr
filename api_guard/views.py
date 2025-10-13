@@ -76,7 +76,7 @@ from .serializers import (
     GuardTaskUpdateSerializer,
 )
 
-from .emailer import send_email_otp
+from .emailer import send_email_otp, notify_geofence_violation
 from .services.attendance import (
     close_stale_attendance_for_employee,
     flag_absent_assignments_for_employee,
@@ -432,6 +432,20 @@ def _monitoring_details(
         payload["suggested_outside_ping_seconds"] = outside_seconds
     if config:
         payload["config_id"] = str(config.id)
+        try:
+            # متى يبدأ التتبّع: check_in أو shift_start
+            payload["tracking_start_mode"] = getattr(config, "tracking_start_mode", "check_in") or "check_in"
+        except Exception:
+            payload["tracking_start_mode"] = "check_in"
+        try:
+            payload["reject_outside_geofence"] = bool(getattr(config, "reject_outside_geofence", False))
+        except Exception:
+            payload["reject_outside_geofence"] = False
+        try:
+            timeout_min = int(getattr(config, "heartbeat_timeout_minutes", 0) or 0)
+            payload["heartbeat_timeout_minutes"] = timeout_min if timeout_min > 0 else 0
+        except Exception:
+            payload["heartbeat_timeout_minutes"] = 0
     if rule:
         payload["violation_rule_id"] = str(rule.id)
         payload["violation_rule_title"] = rule.title
@@ -1309,6 +1323,16 @@ class AttendanceCheckAPIView(APIView):
                     # تسجيل مخالفة
                     _ = _apply_geofence_salary_deduction(employee, GEOFENCE_DEDUCTION_PERCENT)
                     violation_escalated = True
+                    try:
+                        notify_geofence_violation(
+                            employee=employee,
+                            location=rec.location or location,
+                            outside_minutes=violation_outside_minutes,
+                            grace_minutes=monitoring_grace_minutes,
+                            recorded_at=now_local,
+                        )
+                    except Exception:
+                        pass
 
             LocationPing.objects.filter(employee=employee, violation_triggered=False).delete()
 
@@ -1396,6 +1420,16 @@ class AttendanceCheckAPIView(APIView):
                 if violation_outside_minutes >= monitoring_grace_minutes:
                     _ = _apply_geofence_salary_deduction(employee, GEOFENCE_DEDUCTION_PERCENT)
                     violation_escalated = True
+                    try:
+                        notify_geofence_violation(
+                            employee=employee,
+                            location=rec.location or location,
+                            outside_minutes=violation_outside_minutes,
+                            grace_minutes=monitoring_grace_minutes,
+                            recorded_at=now_local,
+                        )
+                    except Exception:
+                        pass
 
             LocationPing.objects.filter(employee=employee, violation_triggered=False).delete()
 
@@ -1511,6 +1545,31 @@ class LocationPingAPIView(APIView):
         accuracy = ser.validated_data.get("accuracy")
         recorded_at = _make_aware(ser.validated_data.get("recorded_at") or dj_timezone.now())
 
+        # التحقق من ربط الجهاز (إن كان مفعّلًا)
+        try:
+            binding_enabled = bool(getattr(settings, "ENABLE_DEVICE_BINDING", False))
+        except Exception:
+            binding_enabled = False
+        if binding_enabled:
+            try:
+                device_hash = request.headers.get("X-Device-Hash") or (request.data.get("device_hash") if hasattr(request, "data") else None)
+                if not device_hash:
+                    return fail("جهاز غير موثّق", code="DEVICE_MISMATCH", status=403)
+                try:
+                    hashed = _device_hash(device_hash)
+                except Exception:
+                    hashed = device_hash
+                ok_device = TrustedDevice.objects.filter(
+                    user=request.user,
+                    deleted_at__isnull=True,
+                    device_hash__in=[device_hash, hashed],
+                ).exists()
+                if not ok_device:
+                    return fail("الجهاز غير موثّق أو غير مطابق للجلسة", code="DEVICE_MISMATCH", status=403)
+            except Exception:
+                # في حال حدوث خطأ غير متوقع، لا نفشل التتبع
+                pass
+
         found = ser.find_best_location(employee, lat, lng)
         if not found:
             return Response({"detail": "لا يوجد موقع مكلَّف به ضمن النطاق."}, status=status.HTTP_404_NOT_FOUND)
@@ -1555,7 +1614,47 @@ class LocationPingAPIView(APIView):
                 active_attendance = None
 
         within_shift_window = assignment is not None
-        tracking_active = bool(monitoring_active_config and within_shift_window and active_attendance)
+        # وضع بدء التتبّع: من تسجيل الحضور (الافتراضي) أو من بداية الوردية
+        tracking_mode = None
+        try:
+            tracking_mode = getattr(monitoring_config, "tracking_start_mode", None) or "check_in"
+        except Exception:
+            tracking_mode = "check_in"
+        if tracking_mode not in ("check_in", "shift_start"):
+            tracking_mode = "check_in"
+
+        if tracking_mode == "shift_start":
+            tracking_active = bool(monitoring_active_config and within_shift_window)
+        else:
+            tracking_active = bool(monitoring_active_config and within_shift_window and active_attendance)
+
+        # مهلة انقطاع النبضات: إن تم ضبطها ومرّت المدة منذ آخر نبضة → اعتبر التتبع متوقفًا
+        heartbeat_timeout_minutes = 0
+        try:
+            heartbeat_timeout_minutes = int(getattr(monitoring_config, "heartbeat_timeout_minutes", 0) or 0)
+        except Exception:
+            heartbeat_timeout_minutes = 0
+        heartbeat_timed_out = False
+        if tracking_active and heartbeat_timeout_minutes > 0:
+            last_ping = (
+                LocationPing.objects
+                .filter(employee=employee)
+                .order_by('-recorded_at')
+                .first()
+            )
+            if last_ping is not None:
+                last_aw = _make_aware(last_ping.recorded_at)
+                try:
+                    delta_min = (recorded_at - last_aw).total_seconds() / 60.0
+                    if delta_min >= heartbeat_timeout_minutes:
+                        heartbeat_timed_out = True
+                except Exception:
+                    pass
+            else:
+                # بدون أي نبضات سابقة وتعريف مهلة — اعتبرها متوقفة حتى أول نبضة تُنشأ الآن
+                pass
+        if heartbeat_timed_out:
+            tracking_active = False
 
         monitoring_payload = dict(monitoring_payload or {})
         monitoring_payload.update({
@@ -1563,7 +1662,39 @@ class LocationPingAPIView(APIView):
             "tracking_active": tracking_active,
             "shift_window_start": _local_iso(window_start),
             "shift_window_end": _local_iso(window_end),
+            "tracking_start_mode": tracking_mode,
+            "heartbeat_timeout_minutes": heartbeat_timeout_minutes,
+            "heartbeat_timed_out": heartbeat_timed_out,
         })
+
+        # رفض النبضات إذا لا توجد جلسة تتبّع فعّالة عند اختيار البدء بعد الحضور
+        if tracking_mode == "check_in" and (not active_attendance):
+            return fail("التتبّع غير فعّال — لم يتم تسجيل الحضور", code="TRACKING_NOT_ACTIVE", status=400)
+
+        # رفض خارج النطاق إن كان الضبط مفعّلًا لذلك
+        try:
+            reject_outside = bool(getattr(monitoring_config, "reject_outside_geofence", False))
+        except Exception:
+            reject_outside = False
+        if reject_outside and tracking_active and not within_radius:
+            return Response({
+                "ok": False,
+                "detail": "خارج نطاق الموقع المسموح به.",
+                "code": "OUT_OF_GEOFENCE",
+                "within_radius": within_radius,
+                "distance": round(dist, 2) if dist is not None else None,
+                "radius": radius,
+                "mode": mode,
+                "location": {
+                    "id": str(loc.id),
+                    "name": loc.name,
+                    "client_name": getattr(loc, "client_name", ""),
+                    "center_lat": center_lat,
+                    "center_lng": center_lng,
+                },
+                "monitoring": monitoring_payload,
+                "should_monitor_location": False,
+            }, status=status.HTTP_400_BAD_REQUEST)
 
         # تأكد من داخل نافذة الوردية بحسب إعداد شركتك (اختياري)
         start, end, unrestricted, pre_buf, post_buf = get_current_shift_window(request.user)
@@ -1631,6 +1762,16 @@ class LocationPingAPIView(APIView):
                     ping.violation_triggered = True
                     ping.save(update_fields=["violation_triggered"])
                     violation_triggered = True
+                    try:
+                        notify_geofence_violation(
+                            employee=employee,
+                            location=loc,
+                            outside_minutes=outside_minutes,
+                            grace_minutes=monitoring_grace_minutes,
+                            recorded_at=recorded_at,
+                        )
+                    except Exception:
+                        pass
 
         next_ping_seconds = None
         if tracking_active:
