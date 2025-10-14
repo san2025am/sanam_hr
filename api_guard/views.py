@@ -771,6 +771,32 @@ class GuardMeView(APIView):
         return Response(EmployeeMeSerializer(emp).data, status=status.HTTP_200_OK)
 
 
+class GuardProfilePhotoUploadView(APIView):
+    """استقبال صورة الموظف (كاميرا/معرض) وتوليد/إرجاع رقم badge_code."""
+    permission_classes = [IsAuthenticated]
+    parser_classes = (MultiPartParser, FormParser)
+
+    def post(self, request):
+        employee = _require_guard_employee(request.user)
+        file_obj = request.FILES.get('photo') or request.FILES.get('image')
+        if not file_obj:
+            return Response({"detail": "الرجاء إرفاق الصورة تحت المفتاح photo"}, status=status.HTTP_400_BAD_REQUEST)
+
+        # حفظ الصورة
+        employee.profile_photo = file_obj
+        # badge_code يُولَّد تلقائيًا في pre_save إن كان غير موجود
+        # استخدم save() الكامل لضمان حفظ أي حقل تم توليده تلقائيًا
+        employee.save()
+
+        data = EmployeeMeSerializer(employee, context={'request': request}).data
+        return Response({
+            "ok": True,
+            "detail": "تم تحديث صورة الملف الشخصي.",
+            "badge_code": data.get('badge_code'),
+            "profile_photo_url": data.get('profile_photo_url'),
+        }, status=status.HTTP_200_OK)
+
+
 # =========================
 # Attendance (POST-only)
 # =========================

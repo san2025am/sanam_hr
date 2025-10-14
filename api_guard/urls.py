@@ -17,6 +17,7 @@ from api_guard.views import (
     GuardTaskListView,
     GuardTaskUpdateView,
     GuardUniformItemListView,
+    GuardProfilePhotoUploadView,
     PasswordForgotUsernameView,
     PasswordResetUsernameView,
     ResolveLocationAPIView,
@@ -45,6 +46,7 @@ urlpatterns = [
     path("guards/tasks/", GuardTaskListView.as_view(), name="guard-tasks"),
     path("guards/tasks/<uuid:pk>/", GuardTaskUpdateView.as_view(), name="guard-task-update"),
     path("guards/uniform-items/", GuardUniformItemListView.as_view(), name="guard-uniform-items"),
+    path("guards/profile/photo/", GuardProfilePhotoUploadView.as_view(), name="guard-profile-photo"),
     path("attendance/last/", AttendanceLastForMeView.as_view(), name="attendance_last"),
     path("attendance/exists/<uuid:pk>/", AttendanceExistsView.as_view(), name="attendance_exists"),
 ]

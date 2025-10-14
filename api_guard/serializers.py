@@ -298,6 +298,8 @@ class EmployeeMeSerializer(serializers.ModelSerializer):
     location_instructions   = serializers.SerializerMethodField()
     supervisor_name         = serializers.SerializerMethodField()
     supervisor_phone        = serializers.SerializerMethodField()
+    badge_code              = serializers.CharField(read_only=True, allow_null=True)
+    profile_photo_url       = serializers.SerializerMethodField()
 
     tasks  = serializers.SerializerMethodField()
     shifts = serializers.SerializerMethodField()
@@ -327,6 +329,7 @@ class EmployeeMeSerializer(serializers.ModelSerializer):
             "supervisor_name", "supervisor_phone",
             "locations", "salary", "tasks", "shifts",
             "shift_assignments", "violations", "salary_deduction_details",
+            "badge_code", "profile_photo_url",
         ]
 
     def get_shift_assignments(self, obj):
@@ -355,6 +358,24 @@ class EmployeeMeSerializer(serializers.ModelSerializer):
             "base_salary": None, "bonuses": None, "overtime": None,
             "deductions": None, "total_salary": None, "pay_date": None
         }
+
+    def get_profile_photo_url(self, obj):
+        photo = getattr(obj, 'profile_photo', None)
+        if not photo:
+            return None
+        try:
+            request = self.context.get('request')
+        except Exception:
+            request = None
+        url = photo.url if hasattr(photo, 'url') else None
+        if not url:
+            return None
+        if request is not None:
+            try:
+                return request.build_absolute_uri(url)
+            except Exception:
+                return url
+        return url
 
     def get_location_instructions(self, obj):
         qs = EmployeeLocationAssignment.objects.filter(employee=obj).select_related("location")

@@ -96,6 +96,10 @@ class Employee(BaseModel):
     date_of_birth_gregorian = models.DateField(null=True, blank=True, verbose_name="تاريخ الميلاد (ميلادي)")
     id_expiry_date = models.DateField(null=True, blank=True, verbose_name="تاريخ انتهاء الهوية")
     id_image = models.ImageField(upload_to='id_cards/', null=True, blank=True, verbose_name="صورة الهوية")
+    # صورة شخصية للحارس (للملف الشخصي داخل التطبيق)
+    profile_photo = models.ImageField(upload_to='employee_photos/', null=True, blank=True, verbose_name="صورة الموظف")
+    # رقم داخلي فريد من 8 خانات يبدأ بـ 8
+    badge_code = models.CharField(max_length=8, unique=True, null=True, blank=True, verbose_name="رقم الموظف (8 خانات)")
 
     # العمل
     hire_date = models.DateField(null=True, blank=True, verbose_name="تاريخ التعيين")
@@ -141,6 +145,30 @@ class Employee(BaseModel):
     class Meta:
         verbose_name = "3. موظف"
         verbose_name_plural = "3. الموظفون"
+
+
+def _generate_badge_code() -> str:
+    import random
+    # يبدأ بـ 8 + 7 أرقام عشوائية
+    return '8' + ''.join(str(random.randint(0, 9)) for _ in range(7))
+
+
+@receiver(pre_save, sender=Employee)
+def ensure_badge_code(sender, instance: Employee, **kwargs):
+    # عيّن رقمًا تلقائيًا إذا كان فارغًا
+    if getattr(instance, 'badge_code', None):
+        code = str(instance.badge_code).strip()
+        if len(code) == 8 and code.isdigit() and code.startswith('8'):
+            instance.badge_code = code
+            return
+        # إن كانت قيمة غير صالحة، سنستبدلها
+    # جرّب عدة مرات لضمان التفرد
+    for _ in range(10):
+        candidate = _generate_badge_code()
+        if not Employee.objects.filter(badge_code=candidate).exists():
+            instance.badge_code = candidate
+            return
+    # في أسوأ الأحوال، اتركها فارغة لتفشل قاعدة unique لاحقًا بشكل صريح
 
 # ===================================================================
 # 2) المواقع والمهام والورديات
