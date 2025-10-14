@@ -580,6 +580,61 @@ class TrustedDeviceAdmin(admin.ModelAdmin):
     readonly_fields = ('first_seen_at', 'last_seen_at')
     ordering = ('-last_seen_at',)
 
+    def _device_hash(self, raw_id: str) -> str:
+        import hashlib
+        normalized = (raw_id or "").strip()
+        if not normalized:
+            return ""
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    def save_model(self, request, obj, form, change):
+        """
+        عالج حالة تكرار (user, device_hash) بشكل لطيف:
+        - إن وُجد سجل سابق (حتى لو محذوف منطقيًا) بنفس البصمة، حدّثه بدل إنشاء سجل جديد.
+        - هذا يمنع IntegrityError من قاعدة unique_together.
+        """
+        try:
+            user = getattr(obj, 'user', None)
+            raw_hash = (getattr(obj, 'device_hash', '') or '').strip()
+            if not user or not raw_hash:
+                return super().save_model(request, obj, form, change)
+
+            # ابحث عن سجل مطابق (بالحالة الخام أو المُهشّرة)
+            hashed = self._device_hash(raw_hash)
+            from .models import TrustedDevice
+            all_qs = getattr(TrustedDevice, 'all_objects', TrustedDevice.objects)
+            existing = (all_qs
+                        .filter(user=user, device_hash__in=[raw_hash, hashed])
+                        .order_by('-last_seen_at')
+                        .first())
+            if existing and not change:
+                # أنعش السجل القائم بدل إنشاء جديد
+                name = (getattr(obj, 'device_name', '') or '').strip()
+                fields = []
+                if getattr(existing, 'deleted_at', None) is not None:
+                    existing.deleted_at = None
+                    fields.append('deleted_at')
+                if name and name != (existing.device_name or ''):
+                    existing.device_name = name
+                    fields.append('device_name')
+                existing.last_seen_at = existing.last_seen_at  # auto_now
+                # إن كانت القيمة المدخلة تختلف عن المخزنة (raw مقابل hashed) حافظ على المخزنة
+                # فقط لو لا يوجد hash سابق، خزّن المُهشّر بشكل موحّد
+                try:
+                    if existing.device_hash not in (raw_hash, hashed) and raw_hash:
+                        existing.device_hash = hashed or raw_hash
+                        fields.append('device_hash')
+                except Exception:
+                    pass
+                existing.save(update_fields=list(set(fields + ['updated_at'])) or None)
+                from django.contrib import messages
+                messages.success(request, 'تم تحديث الجهاز الموثوق القائم بدلاً من إنشاء سجل مكرر.')
+                return
+        except Exception:
+            # في حال أي خطأ غير متوقع، ارجع للسلوك الافتراضي حتى لا تمنع الحفظ
+            pass
+        return super().save_model(request, obj, form, change)
+
 
 @admin.register(DeviceLoginChallenge)
 class DeviceLoginChallengeAdmin(admin.ModelAdmin):
