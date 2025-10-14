@@ -2186,6 +2186,11 @@ class AttendanceLastForMeView(APIView):
             if candidate and candidate > 0:
                 next_ping_seconds = candidate
 
+        # إذا كان السجل مفتوحًا (لم يُسجّل انصراف) والآن ضمن نافذة الوردية العابرة لمنتصف الليل،
+        # اعتبره "سجل اليوم" حتى لو كان check_in أمس.
+        if getattr(record, "check_out_time", None) is None and within_shift and now_local:
+            is_today = True
+
         payload: dict[str, object] = {
             "ok": True,
             "detail": f"آخر تسجيل: {'الحضور' if action=='check_in' else ('الانصراف' if action=='check_out' else 'الانصراف المبكر')}.",
