@@ -90,6 +90,7 @@ from .services.attendance import (
     flag_absent_assignments_for_employee,
 )
 from .sms import send_sms_twilio
+from .utils.net import client_ip as _client_ip, lookup_asn as _lookup_asn
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -1244,6 +1245,34 @@ class AttendanceCheckAPIView(APIView):
         now       = dj_timezone.now()
         now_local = _local_dt(now)
 
+        # Extract device/app/network metadata
+        req_ip = _client_ip(request)
+        asn, vpn_suspected = _lookup_asn(req_ip or "")
+        device_id_hdr = request.headers.get("X-Device-Hash") or safe_data.get("device_hash")
+        device_name_hdr = request.headers.get("X-Device-Name")
+        app_version_hdr = request.headers.get("X-App-Version")
+        os_version_hdr = request.headers.get("X-OS-Version") or request.headers.get("X-Platform")
+
+        is_mock = bool(ser.validated_data.get("is_mock", False))
+        provider = ser.validated_data.get("provider")
+        location_age_ms = ser.validated_data.get("location_age_ms")
+        integrity_verdict = ser.validated_data.get("integrity_verdict")
+
+        # confidence score (simple):
+        try:
+            min_acc = float(getattr(settings, "MIN_GPS_ACCURACY_M", 50) or 50)
+        except Exception:
+            min_acc = 50.0
+        if violation_flag:
+            confidence_score = 0.2
+        else:
+            if (acc or 0) <= min_acc:
+                confidence_score = 1.0
+            elif (acc or 0) <= 100:
+                confidence_score = 0.7
+            else:
+                confidence_score = 0.4
+
         start_dt  = ser.validated_data.get("shift_window_start")
         end_dt    = ser.validated_data.get("shift_window_end")
         blocked   = ser.validated_data.get("blocked")
@@ -1331,6 +1360,30 @@ class AttendanceCheckAPIView(APIView):
             if getattr(rec, "is_violation", False):
                 rec.is_violation = False
                 update_fields.append("is_violation")
+            # attach auditing fields
+            rec.lat = lat
+            rec.lng = lng
+            rec.accuracy = acc
+            rec.location_age_ms = location_age_ms
+            rec.provider = provider
+            rec.is_mock = is_mock
+            rec.integrity_verdict = integrity_verdict
+            rec.device_id = device_id_hdr
+            rec.app_version = app_version_hdr
+            rec.os_version = os_version_hdr
+            rec.ip = req_ip
+            rec.asn = asn
+            rec.vpn_suspected = bool(vpn_suspected)
+            rec.confidence_score = confidence_score
+            rec.reason_code = "ACCEPT_WITH_VIOLATION" if violation_flag else "ACCEPT"
+            rec.policy_version = "1.0"
+            rec.decision_path = "SOFT_ACCEPT_VIOLATION" if violation_flag else "STRICT_ACCEPT"
+            update_fields += [
+                "lat", "lng", "accuracy", "location_age_ms", "provider", "is_mock",
+                "integrity_verdict", "device_id", "app_version", "os_version",
+                "ip", "asn", "vpn_suspected", "confidence_score", "reason_code",
+                "policy_version", "decision_path",
+            ]
             if update_fields:
                 rec.save(update_fields=update_fields)
 
@@ -1393,7 +1446,31 @@ class AttendanceCheckAPIView(APIView):
             rec.location = rec.location or location
             rec.check_type = action
             rec.timestamp = rec.timestamp or now
-            update_fields = ["check_out_time", "notes", "location", "check_type", "timestamp"]
+            # update auditing
+            rec.lat = lat
+            rec.lng = lng
+            rec.accuracy = acc
+            rec.location_age_ms = location_age_ms
+            rec.provider = provider
+            rec.is_mock = is_mock
+            rec.integrity_verdict = integrity_verdict
+            rec.device_id = device_id_hdr or rec.device_id
+            rec.app_version = app_version_hdr or rec.app_version
+            rec.os_version = os_version_hdr or rec.os_version
+            rec.ip = req_ip or rec.ip
+            rec.asn = asn or rec.asn
+            rec.vpn_suspected = bool(vpn_suspected)
+            rec.confidence_score = confidence_score
+            rec.reason_code = "ACCEPT_WITH_VIOLATION" if violation_flag else "ACCEPT"
+            rec.policy_version = "1.0"
+            rec.decision_path = "SOFT_ACCEPT_VIOLATION" if violation_flag else "STRICT_ACCEPT"
+            update_fields = [
+                "check_out_time", "notes", "location", "check_type", "timestamp",
+                "lat", "lng", "accuracy", "location_age_ms", "provider", "is_mock",
+                "integrity_verdict", "device_id", "app_version", "os_version",
+                "ip", "asn", "vpn_suspected", "confidence_score", "reason_code",
+                "policy_version", "decision_path",
+            ]
             if violation_flag or rec.is_violation:
                 rec.is_violation = rec.is_violation or violation_flag
                 update_fields.append("is_violation")

@@ -64,6 +64,19 @@ GEOFENCE_ALERT_RECIPIENTS = [
 GEOFENCE_OUTSIDE_WARNING_MINUTES = _env_int("GEOFENCE_OUTSIDE_WARNING_MINUTES", 60)
 GEOFENCE_OUTSIDE_DEDUCTION_PERCENT = _env_int("GEOFENCE_OUTSIDE_DEDUCTION_PERCENT", 2)
 
+# Attendance/Geofence hardening toggles
+ENABLE_DEVICE_BINDING = _env_bool("ENABLE_DEVICE_BINDING", False)
+MIN_GPS_ACCURACY_M = _env_int("MIN_GPS_ACCURACY_M", 50)
+
+# Play Integrity (server-side enforcement is optional; app may still send tokens)
+ENFORCE_PLAY_INTEGRITY = _env_bool("ENFORCE_PLAY_INTEGRITY", False)
+_allowed_raw = os.getenv("INTEGRITY_ALLOWED_VERDICTS", "MEETS_DEVICE_INTEGRITY,MEETS_STRONG_INTEGRITY")
+INTEGRITY_ALLOWED_VERDICTS = [s.strip() for s in _allowed_raw.split(",") if s.strip()]
+
+# Optional IP/ASN provider hooks (not enforced by default)
+MAXMIND_DB_PATH = os.getenv("MAXMIND_DB_PATH")
+IPINFO_TOKEN = os.getenv("IPINFO_TOKEN")
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 

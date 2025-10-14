@@ -511,6 +511,11 @@ class AttendanceCheckSerializer(serializers.Serializer):
     lat = serializers.FloatField()
     lng = serializers.FloatField()
     accuracy = serializers.FloatField(required=False, min_value=0, default=9999)
+    provider = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    is_mock = serializers.BooleanField(required=False, default=False)
+    location_age_ms = serializers.IntegerField(required=False, allow_null=True)
+    integrity_verdict = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    integrity_token = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     # مفاتيح البصمة القديمة/الجديدة
     biometric_verified = serializers.BooleanField(required=False, default=False)
@@ -614,6 +619,28 @@ class AttendanceCheckSerializer(serializers.Serializer):
             attrs.update({"employee": employee, "location_obj": location})
             raise serializers.ValidationError({"biometric_method": "طريقة غير صالحة. المقبول: fingerprint/face/pin"})
 
+        # ===== منع مواقع وهمية (إن وصلت من التطبيق) =====
+        if bool(attrs.get("is_mock", False)):
+            attrs.update({
+                "employee": employee, "location_obj": location,
+                "blocked": True,
+                "blocked_reason": "⚠️ تم رصد استخدام موقع وهمي (Mock).",
+            })
+            return attrs
+
+        # ===== Play Integrity (تحقق اختياري على الخادم) =====
+        from django.conf import settings as _settings
+        enforced = bool(getattr(_settings, "ENFORCE_PLAY_INTEGRITY", False))
+        allowed = set(getattr(_settings, "INTEGRITY_ALLOWED_VERDICTS", []) or [])
+        verdict = (attrs.get("integrity_verdict") or "").strip()
+        if enforced and (not verdict or (allowed and verdict not in allowed)):
+            attrs.update({
+                "employee": employee, "location_obj": location,
+                "blocked": True,
+                "blocked_reason": "⚠️ فشل التحقق من سلامة الجهاز/التطبيق (Integrity)",
+            })
+            return attrs
+
         # ===== فحص الهوية/العقد كما في كودك الأصلي (بدون تغيير) =====
         today = dj_timezone.localdate()
         if getattr(employee, "id_expiry_date", None):
@@ -665,17 +692,24 @@ class AttendanceCheckSerializer(serializers.Serializer):
         attrs["location_center_lat"] = None
         attrs["location_center_lng"] = None
 
-        if getattr(location, "gps_radius", None):
-            try:
-                if acc > float(location.gps_radius):
-                    attrs.update({
-                        "employee": employee, "location_obj": location,
-                        "blocked": True,
-                        "blocked_reason": "⚠️ دقة تحديد الموقع ضعيفة. اقترب من الموقع وحاول مجددًا.",
-                    })
-                    return attrs
-            except (TypeError, ValueError):
-                pass
+        # تحقق من الدقة الدنيا العامة مع احترام نصف قطر الموقع (نأخذ الأصغر كحد أدنى عملي)
+        from django.conf import settings as _settings
+        try:
+            min_acc = float(getattr(_settings, "MIN_GPS_ACCURACY_M", 50) or 50)
+        except Exception:
+            min_acc = 50.0
+        try:
+            site_radius = float(getattr(location, "gps_radius", None) or 0.0)
+        except Exception:
+            site_radius = 0.0
+        effective_min_acc = min(min_acc, site_radius) if site_radius > 0 else min_acc
+        if acc > effective_min_acc:
+            attrs.update({
+                "employee": employee, "location_obj": location,
+                "blocked": True,
+                "blocked_reason": "⚠️ دقة GPS منخفضة.",
+            })
+            return attrs
 
         inside_polygon = None
         if getattr(location, "use_polygon", False) and getattr(location, "polygon_coords", None):
@@ -727,6 +761,24 @@ class AttendanceCheckSerializer(serializers.Serializer):
                     "⚠️ جهازك خارج نطاق الموقع المسموح به. ستُسجّل مخالفة في حال استمرار الابتعاد لأكثر من المدة المسموح بها."
                 )
                 violation_codes.append("outside_radius")
+
+        # رفض صارم إذا كانت سياسة الموقع تفرض ذلك
+        reject_geofence = False
+        try:
+            cfg = getattr(location, "monitoring_config", None)
+            reject_geofence = bool(getattr(cfg, "reject_outside_geofence", False))
+        except Exception:
+            reject_geofence = False
+        if ("outside_polygon" in violation_codes or "outside_radius" in violation_codes) and reject_geofence:
+            attrs.update({
+                "employee": employee, "location_obj": location,
+                "blocked": True,
+                "blocked_reason": "⚠️ خارج حدود/نطاق الموقع.",
+                "violation": True,
+                "violation_reason": " ".join(violation_messages) if violation_messages else None,
+                "violation_codes": violation_codes,
+            })
+            return attrs
 
         # ===== حساب نافذة الوردية (كما لديك) =====
         now_aware = dj_timezone.now()
@@ -920,6 +972,11 @@ class AttendanceCheckSerializer(serializers.Serializer):
             "shift_within_window": True,
             "biometric_verified": bio_ok,
             "biometric_method": bio_method,
+            "provider": attrs.get("provider"),
+            "is_mock": bool(attrs.get("is_mock", False)),
+            "location_age_ms": attrs.get("location_age_ms"),
+            "integrity_verdict": attrs.get("integrity_verdict"),
+            "integrity_token": attrs.get("integrity_token"),
         })
         return attrs
 

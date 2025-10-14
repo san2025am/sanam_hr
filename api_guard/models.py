@@ -519,6 +519,25 @@ class AttendanceRecord(BaseModel):
     biometric_verified = models.BooleanField(default=False)
     biometric_method = models.CharField(max_length=50, blank=True, null=True)
     biometric_attempts = models.IntegerField(default=0)
+    # New auditing/security fields
+    lat = models.FloatField(null=True, blank=True)
+    lng = models.FloatField(null=True, blank=True)
+    accuracy = models.FloatField(null=True, blank=True)
+    location_age_ms = models.IntegerField(null=True, blank=True)
+    provider = models.CharField(max_length=20, null=True, blank=True)
+    is_mock = models.BooleanField(default=False)
+    integrity_verdict = models.CharField(max_length=64, null=True, blank=True)
+    integrity_details = models.JSONField(null=True, blank=True)
+    device_id = models.CharField(max_length=128, null=True, blank=True)
+    app_version = models.CharField(max_length=50, null=True, blank=True)
+    os_version = models.CharField(max_length=100, null=True, blank=True)
+    ip = models.GenericIPAddressField(null=True, blank=True)
+    asn = models.CharField(max_length=50, null=True, blank=True)
+    vpn_suspected = models.BooleanField(default=False)
+    confidence_score = models.FloatField(null=True, blank=True)
+    reason_code = models.CharField(max_length=60, null=True, blank=True)
+    policy_version = models.CharField(max_length=20, null=True, blank=True)
+    decision_path = models.CharField(max_length=255, null=True, blank=True)
     check_type = models.CharField(max_length=20, choices=[
         ('check_in', 'Check In'),
         ('check_out', 'Check Out'),
