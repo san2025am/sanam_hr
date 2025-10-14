@@ -639,7 +639,7 @@ class TrustedDeviceAdmin(admin.ModelAdmin):
 @admin.register(DeviceLoginChallenge)
 class DeviceLoginChallengeAdmin(admin.ModelAdmin):
     list_display = ('user', 'device_name', 'device_hash', 'expires_at', 'attempts', 'verified_at')
-    search_fields = ('user__username', 'user__employee__full_name', 'device_name', 'device_hash')
+    search_fields = ('user__username', 'user__employee__full_name', 'device_name', 'code_hash','device_hash')
     list_filter = ('verified_at', 'expires_at')
     autocomplete_fields = ('user',)
     readonly_fields = ('verified_at',)
