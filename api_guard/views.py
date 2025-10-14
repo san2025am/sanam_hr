@@ -731,7 +731,7 @@ class GuardLoginAndProfileView(APIView):
             )
 
         try:
-            emp_data = EmployeeMeSerializer(employee).data
+            emp_data = EmployeeMeSerializer(employee, context={'request': request}).data
         except DatabaseError as exc:
             logger.exception("Failed to serialize employee profile during guard login: %s", exc)
             return ok({
@@ -768,7 +768,7 @@ class GuardMeView(APIView):
             emp = Employee.objects.select_related("user", "user__role").get(user=u)
         except Employee.DoesNotExist:
             return Response({"detail": "لا يوجد ملف موظف"}, status=status.HTTP_404_NOT_FOUND)
-        return Response(EmployeeMeSerializer(emp).data, status=status.HTTP_200_OK)
+        return Response(EmployeeMeSerializer(emp, context={'request': request}).data, status=status.HTTP_200_OK)
 
 
 class GuardProfilePhotoUploadView(APIView):

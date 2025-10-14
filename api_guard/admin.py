@@ -27,6 +27,7 @@ except Exception:  # pragma: no cover - optional dependency
     EmployeeResource = LocationResource = ReportResource = RequestResource = None
     _HAS_IMPORT_EXPORT = False
 from django import forms
+from django.utils.safestring import mark_safe
 from django.core.exceptions import ValidationError
 
 
@@ -162,18 +163,22 @@ class EmployeeAdmin(ImportExportModelAdmin):
     if EmployeeResource:
         resource_classes = [EmployeeResource]
     list_display = (
-        'full_name', 'national_id', 'phone_number', 'bank_name',
+        'photo_thumb', 'full_name', 'badge_code', 'national_id', 'phone_number', 'bank_name',
         'monthly_leave_quota_hours', 'supervisor'
     )
     search_fields = ('full_name', 'national_id', 'phone_number', 'bank_account')
     list_filter = ('bank_name', 'supervisor')
     autocomplete_fields = ('supervisor',)
+    readonly_fields = ('badge_code', 'profile_photo_preview')
 
     fieldsets = (
         (None, {'fields': ('user', 'full_name', 'supervisor')}),
         ('الهوية والاتصال', {
             'fields': ('national_id', 'phone_number', 'date_of_birth_gregorian',
                        'id_expiry_date', 'id_image')
+        }),
+        ('المعرف الداخلي والصورة', {
+            'fields': ('badge_code', 'profile_photo', 'profile_photo_preview'),
         }),
         ('العمل', {'fields': ('hire_date',)}),
         ('البنك والراتب', {'fields': (
@@ -186,6 +191,24 @@ class EmployeeAdmin(ImportExportModelAdmin):
         ('الإجازات', {'fields': ('monthly_leave_quota_hours',)}),
         ('تعليمات', {'fields': ('instructions',)}),
     )
+
+    def photo_thumb(self, obj):
+        try:
+            if obj.profile_photo and hasattr(obj.profile_photo, 'url'):
+                return mark_safe(f"<img src='{obj.profile_photo.url}' style='width:40px;height:40px;border-radius:50%;object-fit:cover' />")
+        except Exception:
+            pass
+        return "—"
+    photo_thumb.short_description = 'صورة'
+
+    def profile_photo_preview(self, obj):
+        try:
+            if obj.profile_photo and hasattr(obj.profile_photo, 'url'):
+                return mark_safe(f"<img src='{obj.profile_photo.url}' style='max-width:240px;border-radius:8px;border:1px solid #ccc' />")
+        except Exception:
+            pass
+        return "لا توجد صورة"
+    profile_photo_preview.short_description = 'معاينة الصورة'
 
 # api_guard/admin.py
 

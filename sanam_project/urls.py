@@ -26,6 +26,8 @@ from rest_framework_simplejwt.views import (
     TokenRefreshView,
 )
 from django.http import HttpResponse
+from django.conf import settings
+from django.conf.urls.static import static
 
 urlpatterns = [
     # Redirect /admin/ to the custom dashboard
@@ -45,3 +47,7 @@ urlpatterns = [
     path('api/v1/auth/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     # =======================
 ]
+
+# Serve media files in development
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
