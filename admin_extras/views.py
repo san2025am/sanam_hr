@@ -9,7 +9,7 @@ from django.shortcuts import render
 from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
 
-from api_guard.models import Employee, Location, Report, Request, AttendanceRecord, EmployeeViolation, ROLE_NAME_CHOICES
+from api_guard.models import Employee, Location, Report, Request, AttendanceRecord, EmployeeViolation, ROLE_NAME_CHOICES, LocationPing
 from .models import ChatMessage
 
 
@@ -26,6 +26,11 @@ def dashboard_view(request):
         models.Q(check_in_time__date=today) | models.Q(timestamp__date=today)
     ).count()
     violations_today = EmployeeViolation.objects.filter(occurred_at__date=today).count()
+    # Geofence withdrawals (outside-radius/polygon) captured via LocationPing.violation_triggered
+    withdrawals_today = LocationPing.objects.filter(violation_triggered=True, recorded_at__date=today).count()
+    # Escalations to absence due to repeated withdrawals (by rule title)
+    escalations_rule_title = "غياب بسبب الانسحاب المتكرر"
+    escalations_today = EmployeeViolation.objects.filter(occurred_at__date=today, rule__title=escalations_rule_title).count()
     pending_requests_count = Request.objects.filter(status='pending').count()
 
     # Reports per month (last 6 months)
@@ -103,6 +108,16 @@ def dashboard_view(request):
     )
     violations_by_rule = {row['rule__title'] or 'غير محدد': row['c'] for row in violations_by_rule_qs}
 
+    # Top employees by geofence withdrawals today (top 10)
+    top_withdrawals_qs = (
+        LocationPing.objects
+        .filter(violation_triggered=True, recorded_at__date=today)
+        .values('employee__full_name')
+        .annotate(c=Count('id'))
+        .order_by('-c')[:10]
+    )
+    top_withdrawals_today = {row['employee__full_name'] or 'غير محدد': row['c'] for row in top_withdrawals_qs}
+
     # Attendance breakdown (last 30 days)
     last30 = today - timedelta(days=30)
     att_qs = AttendanceRecord.objects.filter(
@@ -127,6 +142,8 @@ def dashboard_view(request):
         'attendance_today': attendance_today,
         'violations_today': violations_today,
         'pending_requests_count': pending_requests_count,
+        'withdrawals_today': withdrawals_today,
+        'escalations_today': escalations_today,
         'months': months,
         'report_totals': totals,
         'req_by_status': req_by_status,
@@ -139,6 +156,7 @@ def dashboard_view(request):
         'violations_by_rule': violations_by_rule,
         'attendance_breakdown': attendance_breakdown,
         'top_locations_reports': top_locations_reports,
+        'top_withdrawals_today': top_withdrawals_today,
         # unified JSON payload for template json_script
         'dashboard_payload': {
             'months': months,
@@ -153,6 +171,7 @@ def dashboard_view(request):
             'violations_by_rule': violations_by_rule,
             'attendance_breakdown': attendance_breakdown,
             'top_locations_reports': top_locations_reports,
+            'top_withdrawals_today': top_withdrawals_today,
         }
     }
     return render(request, 'admin_extras/dashboard.html', context)

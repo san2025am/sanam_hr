@@ -26,6 +26,7 @@
   const violationsByRule = payload.violations_by_rule || {};
   const attendanceBreakdown = payload.attendance_breakdown || {};
   const topLocationsReports = payload.top_locations_reports || {};
+  const topWithdrawalsToday = payload.top_withdrawals_today || {};
 
   const pieLabels = Object.keys(reqByStatus);
   const pieValues = Object.values(reqByStatus);
@@ -183,6 +184,18 @@
     new Chart(tlrTarget, {
       type: 'bar',
       data: { labels, datasets: [{ label: 'Reports by location', data: values, backgroundColor: cssVar('--accent-amber') }]},
+      options: { responsive: true, maintainAspectRatio: false }
+    });
+  }
+
+  // Top withdrawals today (outside geofence)
+  const twtTarget = document.getElementById('topWithdrawalsTodayChart');
+  if (twtTarget && window.Chart) {
+    const labels = Object.keys(topWithdrawalsToday);
+    const values = Object.values(topWithdrawalsToday);
+    new Chart(twtTarget, {
+      type: 'bar',
+      data: { labels, datasets: [{ label: 'Withdrawals (today)', data: values, backgroundColor: cssVar('--accent-amber', '#fd7e14') }]},
       options: { responsive: true, maintainAspectRatio: false }
     });
   }
