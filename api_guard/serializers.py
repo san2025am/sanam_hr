@@ -575,16 +575,35 @@ class AttendanceCheckSerializer(serializers.Serializer):
 
     @staticmethod
     def _anchor_times(now_local, start_t, end_t, anchor_date=None):
-        """إرجاع (start_dt, end_dt) مع دعم الوردية الليلية."""
+        """
+        إرجاع (start_dt, end_dt) وفق القاعدة:
+        - إذا كانت الوردية تعبر منتصف الليل (end_t < start_t) فاليوم المرجعي D هو يوم البداية دائمًا.
+        - عند عدم تحديد anchor_date نختار D تلقائيًا:
+          • إذا now_local.time() < end_t (في ساعات الصباح قبل نهاية الوردية الليلية) ⇒ D = تاريخ اليوم السابق.
+          • خلاف ذلك ⇒ D = تاريخ now_local.
+        - تُضاف يوم واحد لنهاية الوردية الليلية.
+        """
         if anchor_date is None:
-            base = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+            base_date = now_local.date()
+            if end_t <= start_t:
+                # overnight: لو نحن قبل end_t صباحًا، انسبها لليوم السابق D
+                try:
+                    current_t = now_local.timetz() if hasattr(now_local, 'timetz') else now_local.time()
+                except Exception:
+                    current_t = now_local.time()
+                if current_t < end_t:
+                    from datetime import timedelta as _td
+                    base_date = base_date - _td(days=1)
         else:
-            base = now_local.replace(year=anchor_date.year, month=anchor_date.month, day=anchor_date.day,
-                                     hour=0, minute=0, second=0, microsecond=0)
+            base_date = anchor_date
+
+        base = now_local.replace(year=base_date.year, month=base_date.month, day=base_date.day,
+                                 hour=0, minute=0, second=0, microsecond=0)
         start_dt = base.replace(hour=start_t.hour, minute=start_t.minute)
         end_dt   = base.replace(hour=end_t.hour,   minute=end_t.minute)
         if end_t <= start_t:
-            end_dt += timedelta(days=1)
+            from datetime import timedelta as _td
+            end_dt += _td(days=1)
         return start_dt, end_dt
 
     # ===== التحقق =====

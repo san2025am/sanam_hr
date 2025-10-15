@@ -273,18 +273,24 @@ def _expected_checkout(record: AttendanceRecord) -> Optional[datetime]:
     if not (start_time and end_time):
         return None
 
-    anchor_date = getattr(assignment, "date", None) or local_check_in.date()
+    # اليوم المرجعي للوردية: يوم البداية دائمًا
+    # إن كانت الوردية ليلية (تعبر منتصف الليل) وكان وقت الحضور في ساعات الصباح قبل end_time
+    # فاجعل اليوم المرجعي هو اليوم السابق
+    anchor_date = getattr(assignment, "date", None)
+    if anchor_date is None:
+        anchor_date = local_check_in.date()
+        if end_time <= start_time:
+            try:
+                current_t = local_check_in.timetz() if hasattr(local_check_in, 'timetz') else local_check_in.time()
+            except Exception:
+                current_t = local_check_in.time()
+            if current_t < end_time:
+                anchor_date = anchor_date - timedelta(days=1)
 
     start_dt = _make_aware(datetime.combine(anchor_date, start_time))
     end_dt = _make_aware(datetime.combine(anchor_date, end_time))
     if end_time <= start_time:
         end_dt += ONE_DAY
-
-    if local_check_in < start_dt and (start_dt - local_check_in) > timedelta(hours=DEFAULT_WARNING_WINDOW_HOURS):
-        start_dt -= ONE_DAY
-        end_dt -= ONE_DAY
-        if end_time <= start_time:
-            end_dt += ONE_DAY
 
     # Incorporate custom grace periods from assignment
     if assignment:

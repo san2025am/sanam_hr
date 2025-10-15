@@ -2173,13 +2173,23 @@ class AttendanceLastForMeView(APIView):
             reference_dt = dj_timezone.make_aware(reference_dt, tz)
         local_ref = dj_timezone.localtime(reference_dt, timezone=tz)
 
-        start_naive = dt.datetime.combine(local_ref.date(), shift.start_time)
-        end_naive = dt.datetime.combine(local_ref.date(), shift.end_time)
+        # تطبيق قاعدة اليوم المرجعي D للوردية الليلية
+        base_date = local_ref.date()
+        if shift.end_time <= shift.start_time:
+            try:
+                current_t = local_ref.timetz() if hasattr(local_ref, 'timetz') else local_ref.time()
+            except Exception:
+                current_t = local_ref.time()
+            if current_t < shift.end_time:
+                base_date = base_date - dt.timedelta(days=1)
+
+        start_naive = dt.datetime.combine(base_date, shift.start_time)
+        end_naive = dt.datetime.combine(base_date, shift.end_time)
 
         start = dj_timezone.make_aware(start_naive, tz) if dj_timezone.is_naive(start_naive) else start_naive
         end = dj_timezone.make_aware(end_naive, tz) if dj_timezone.is_naive(end_naive) else end_naive
 
-        if end <= start:
+        if shift.end_time <= shift.start_time:
             end = end + timedelta(days=1)
 
         return start, end
