@@ -58,6 +58,7 @@ from .models import (
     EmployeeShiftAssignment,
     Shift,
     GeofenceViolationPause,
+    ShiftAbsenceLog,
     TaskUpdateLog,
 )
 
@@ -101,6 +102,10 @@ GEOFENCE_WARNING_MINUTES = int(getattr(settings, "GEOFENCE_OUTSIDE_WARNING_MINUT
 GEOFENCE_RULE_TITLE = "الخروج عن نطاق الموقع"
 GEOFENCE_RULE_DESCRIPTION = (
     "يتم تسجيل هذه المخالفة عند خروج الحارس عن نطاق الموقع المحدد لأكثر من المدة المسموح بها."
+)
+REPEATED_WITHDRAW_ABSENCE_RULE_TITLE = "غياب بسبب الانسحاب المتكرر"
+REPEATED_WITHDRAW_ABSENCE_RULE_DESC = (
+    "تصعيد إلى غياب داخل نفس الوردية بعد تجاوز حد وقائع الانسحاب خارج النطاق المحددة في ضبط مراقبة الموقع."
 )
 try:
     GEOFENCE_DEDUCTION_PERCENT = Decimal(str(getattr(settings, "GEOFENCE_OUTSIDE_DEDUCTION_PERCENT", 2)))
@@ -493,6 +498,13 @@ def _monitoring_details(
         "violation_grace_minutes": grace_minutes,
         "default_violation_grace_minutes": GEOFENCE_WARNING_MINUTES,
     }
+    # ضم حدّ التصعيد إلى غياب لو كان معرفًا
+    try:
+        if config is not None:
+            th = int(getattr(config, "absence_withdrawals_threshold", 0) or 0)
+            payload["absence_withdrawals_threshold"] = th
+    except Exception:
+        pass
     if ping_seconds:
         payload["ping_interval_seconds"] = ping_seconds
     if outside_seconds:
@@ -2013,6 +2025,84 @@ class LocationPingAPIView(APIView):
                         )
                     except Exception:
                         pass
+
+                    # بعد تسجيل واقعة انسحاب: فحص التصعيد إلى غياب وفق حد الضبط
+                    try:
+                        threshold = 0
+                        try:
+                            threshold = int(getattr(monitoring_config, "absence_withdrawals_threshold", 0) or 0)
+                        except Exception:
+                            threshold = 0
+                        if threshold > 0 and assignment is not None and shift_obj is not None and window_start and window_end:
+                            incidents = (LocationPing.objects
+                                         .filter(employee=employee,
+                                                 violation_triggered=True,
+                                                 recorded_at__gte=window_start,
+                                                 recorded_at__lte=window_end)
+                                         .count())
+                            if incidents >= threshold:
+                                # حساب تاريخ الوردية الاسمي
+                                start_t = getattr(assignment, "start_time", None) or getattr(shift_obj, "start_time", None)
+                                end_t = getattr(assignment, "end_time", None) or getattr(shift_obj, "end_time", None)
+                                try:
+                                    sdt, _ = AttendanceCheckSerializer._anchor_times(_local_dt(recorded_at), start_t, end_t, anchor_date=getattr(assignment, "date", None))
+                                except Exception:
+                                    sdt = window_start
+                                shift_date = (sdt or window_start).date()
+
+                                already_absent = ShiftAbsenceLog.objects.filter(
+                                    employee=employee,
+                                    shift=shift_obj,
+                                    date=shift_date,
+                                    deleted_at__isnull=True,
+                                ).exists()
+                                if not already_absent:
+                                    # لائحة المخالفة: إن لم تكن موجودة فأنشئها
+                                    try:
+                                        abs_rule = ViolationRule.objects.get(title=REPEATED_WITHDRAW_ABSENCE_RULE_TITLE)
+                                    except ViolationRule.DoesNotExist:
+                                        abs_rule = ViolationRule.objects.create(
+                                            title=REPEATED_WITHDRAW_ABSENCE_RULE_TITLE,
+                                            description=REPEATED_WITHDRAW_ABSENCE_RULE_DESC,
+                                            default_action="warn",
+                                            default_deduction_percent=Decimal("0"),
+                                        )
+
+                                    absence_violation = EmployeeViolation.objects.create(
+                                        employee=employee,
+                                        rule=abs_rule,
+                                        reported_by=getattr(employee, "supervisor", None),
+                                        location=loc,
+                                        description=f"تصعيد إلى غياب داخل الوردية بعد {incidents} وقائع انسحاب (الحد {threshold}).",
+                                        warning_level=EmployeeViolation.objects.filter(employee=employee, rule=abs_rule).count() + 1,
+                                        deduction_value=Decimal("0"),
+                                    )
+                                    ShiftAbsenceLog.objects.create(
+                                        employee=employee,
+                                        shift=shift_obj,
+                                        assignment=assignment,
+                                        location=loc,
+                                        date=shift_date,
+                                        violation=absence_violation,
+                                    )
+
+                                    # إيقاف المخالفات المتبقية في هذه الوردية
+                                    try:
+                                        if window_end and recorded_at:
+                                            seconds_left = max(0, int((window_end - recorded_at).total_seconds()))
+                                            minutes_left = max(1, (seconds_left + 59) // 60)
+                                            GeofenceViolationPause.create_or_extend(
+                                                employee=employee,
+                                                location=loc,
+                                                duration_minutes=int(minutes_left),
+                                                reason="إيقاف تلقائي بعد تصعيد إلى غياب بسبب الانسحاب المتكرر",
+                                                created_by=None,
+                                                start_at=recorded_at,
+                                            )
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        logger_api.info("Failed to escalate repeated withdrawals to absence", exc_info=True)
 
         next_ping_seconds = None
         if tracking_active:

@@ -222,6 +222,11 @@ class LocationMonitoringConfig(BaseModel):
         verbose_name="مدة السماح قبل تسجيل المخالفة (دقائق)",
         help_text="إذا تجاوز الابتعاد هذه المدة تُنشأ مخالفة تلقائيًا.",
     )
+    absence_withdrawals_threshold = models.PositiveIntegerField(
+        default=0,
+        verbose_name="حدّ مرات الانسحاب لتسجيل غياب",
+        help_text="عند تكرار وقائع الانسحاب خلال نفس الوردية بهذا العدد أو أكثر يتم تصعيد الحالة إلى غياب. (0 = تعطيل)",
+    )
     reject_outside_geofence = models.BooleanField(
         default=False,
         verbose_name="رفض النبضات خارج النطاق",

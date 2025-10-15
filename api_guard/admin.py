@@ -300,6 +300,7 @@ class LocationMonitoringConfigAdmin(admin.ModelAdmin):
         "is_active",
         "ping_interval_seconds",
         "violation_grace_minutes",
+        "absence_withdrawals_threshold",
         "reject_outside_geofence",
         "heartbeat_timeout_minutes",
         "tracking_start_mode",
@@ -313,6 +314,7 @@ class LocationMonitoringConfigAdmin(admin.ModelAdmin):
         ("التتبع", {"fields": (
             "ping_interval_seconds",
             "violation_grace_minutes",
+            "absence_withdrawals_threshold",
             "reject_outside_geofence",
             "heartbeat_timeout_minutes",
             "tracking_start_mode",
