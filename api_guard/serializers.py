@@ -847,7 +847,8 @@ class AttendanceCheckSerializer(serializers.Serializer):
                 continue
 
             anchor = getattr(a, "date", None) or None
-            start_dt, end_dt = self._anchor_times(now_local, start_t, end_t, anchor_date=anchor)
+            # استخدم مرساة تلقائية بالاعتماد على now_local لضمان دعم الوردية الليلية
+            start_dt, end_dt = self._anchor_times(now_local, start_t, end_t, anchor_date=None)
             pre_buf_min = int(getattr(a, "pre_shift_buffer_minutes", 0) or 0)
             post_buf_min = int(getattr(a, "post_shift_buffer_minutes", 0) or 0)
             pre_buffer = timedelta(minutes=pre_buf_min)

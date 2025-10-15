@@ -383,8 +383,13 @@ def _assignment_window_for(
         if not (start_t and end_t):
             continue
 
-        anchor = assignment.date or None
-        start_dt, end_dt = AttendanceCheckSerializer._anchor_times(local_reference, start_t, end_t, anchor_date=anchor)
+        # ملاحظة مهمة لورديات الليل:
+        # إذا مررنا anchor_date كما هو من السجل فقد نحصل على نافذة خاطئة بعد منتصف الليل
+        # (مثلاً 02:39 صباحًا سيُعتبر خارج نافذة اليوم إذا كان anchor_date = تاريخ اليوم).
+        # لذلك نترك اختيار يوم الارتكاز تلقائيًا بالاعتماد على now_local داخل _anchor_times.
+        start_dt, end_dt = AttendanceCheckSerializer._anchor_times(
+            local_reference, start_t, end_t, anchor_date=None
+        )
         pre_buf_min = int(getattr(assignment, "pre_shift_buffer_minutes", 0) or 0)
         post_buf_min = int(getattr(assignment, "post_shift_buffer_minutes", 0) or 0)
         window_start = start_dt - timedelta(minutes=pre_buf_min)
