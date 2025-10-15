@@ -787,7 +787,17 @@ class GuardMeView(APIView):
             emp = Employee.objects.select_related("user", "user__role").get(user=u)
         except Employee.DoesNotExist:
             return Response({"detail": "لا يوجد ملف موظف"}, status=status.HTTP_404_NOT_FOUND)
-        return Response(EmployeeMeSerializer(emp, context={'request': request}).data, status=status.HTTP_200_OK)
+        data = EmployeeMeSerializer(emp, context={'request': request}).data
+        # إلحاق إعدادات التطبيق العامة لتسمح للعميل بتطبيق سياسة الوقت دون إعادة تسجيل الدخول
+        data = {
+            **data,
+            'app_settings': {
+                'time_format_policy': getattr(settings, 'APP_TIME_FORMAT_POLICY', 'auto'),
+                'time_format_24': 'HH:mm',
+                'time_format_12': 'h:mm a',
+            }
+        }
+        return Response(data, status=status.HTTP_200_OK)
 
 
 class GuardProfilePhotoUploadView(APIView):

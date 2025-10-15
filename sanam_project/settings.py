@@ -114,7 +114,7 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt.token_blacklist',
 ]
 AUTH_USER_MODEL = 'api_guard.User'
-
+INSTALLED_APPS += ['hr']
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
@@ -149,31 +149,31 @@ WSGI_APPLICATION = 'sanam_project.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.2/ref/settings/#databases
 
-# DATABASES = {
-#     'default': {
-#         'ENGINE': 'django.db.backends.sqlite3',
-#         'NAME': BASE_DIR / 'db.sqlite3',
-#     }
-# }
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / 'db.sqlite3',
+    }
+}
 
 # sanam_project/settings.py
 
 # قاعدة البيانات قابلة للتهيئة عبر البيئة، مع سقوط تلقائي إلى SQLite في التطوير
-DB_ENGINE = os.getenv('DB_ENGINE', '').lower()
-MYSQL_HOST = os.getenv('MYSQL_HOST')
-DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.mysql',
-            'NAME': os.getenv('MYSQL_DB', 'sanam_db'),
-            'USER': os.getenv('MYSQL_USER', 'sanam_user'),
-            'PASSWORD': os.getenv('MYSQL_PASSWORD', 'Asmg36@2022'),
-            'HOST': MYSQL_HOST or '31.97.158.157',
-            'PORT': os.getenv('MYSQL_PORT', '3306'),
-            'OPTIONS': {
-                'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
-            },
-        }
-    }
+# DB_ENGINE = os.getenv('DB_ENGINE', '').lower()
+# MYSQL_HOST = os.getenv('MYSQL_HOST')
+# DATABASES = {
+#         'default': {
+#             'ENGINE': 'django.db.backends.mysql',
+#             'NAME': os.getenv('MYSQL_DB', 'sanam_db'),
+#             'USER': os.getenv('MYSQL_USER', 'sanam_user'),
+#             'PASSWORD': os.getenv('MYSQL_PASSWORD', 'Asmg36@2022'),
+#             'HOST': MYSQL_HOST or '31.97.158.157',
+#             'PORT': os.getenv('MYSQL_PORT', '3306'),
+#             'OPTIONS': {
+#                 'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
+#             },
+#         }
+#     }
 
 # Password validation
 # https://docs.djangoproject.com/en/5.2/ref/settings/#auth-password-validators
@@ -204,6 +204,18 @@ TIME_ZONE = 'Asia/Riyadh'
 USE_I18N = True
 
 USE_TZ = True
+
+# ========= Time/Date format policy =========
+# فرض تنسيق 12 ساعة على مستوى الخادم (الإدارة والقوالب)،
+# ويمكن للتطبيق قراءة السياسة عبر /auth/guard/login/ أو /auth/guard/me/
+APP_TIME_FORMAT_POLICY = os.getenv('APP_TIME_FORMAT_POLICY', '12h')  # 'auto' | '12h' | '24h'
+
+# تنسيقات العرض الافتراضية لدجانغو (تؤثر على admin/templates)
+# ملاحظة: لا تغيّر صيغ API (ما تزال ISO 8601)، هذا للعرض فقط
+TIME_FORMAT = 'h:i A'           # 12h مثل 07:30 PM
+DATETIME_FORMAT = 'Y-m-d h:i A' # 2025-10-15 07:30 PM
+SHORT_DATETIME_FORMAT = 'Y-m-d h:i A'
+SHORT_TIME_FORMAT = 'h:i A'
 
 
 # Static files (CSS, JavaScript, Images)
