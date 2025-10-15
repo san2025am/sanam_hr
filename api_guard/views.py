@@ -763,7 +763,14 @@ class GuardLoginAndProfileView(APIView):
                 "role": role_name,
                 "role_label": str(user.role) if getattr(user, "role", None) else None,
             },
-            "employee": emp_data
+            "employee": emp_data,
+            # إعدادات تطبيق عامة يمكن أن يقرأها العميل (اختيارية)
+            "app_settings": {
+                # سيختار التطبيق تلقائيًا حسب نظام الجهاز عندما تكون 'auto'
+                "time_format_policy": getattr(settings, 'APP_TIME_FORMAT_POLICY', 'auto'),  # 'auto' | '12h' | '24h'
+                "time_format_24": "HH:mm",
+                "time_format_12": "h:mm a",
+            },
         })
 
 
