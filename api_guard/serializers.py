@@ -701,7 +701,11 @@ class AttendanceCheckSerializer(serializers.Serializer):
             })
             return attrs
 
-        if contracts_qs.filter(is_signed=False).exists():
+        # بعد تحديث نموذج العقد، استُبدِل الحقل is_signed بـ signed_by_employee/signed_by_company
+        # نعتبر العقد "غير موقَّع" إذا لم يوقعه الموظف، مع قصر الفحص على العقود السارية/غير المنتهية.
+        if contracts_qs.filter(
+            Q(signed_by_employee=False) & (Q(end_date__isnull=True) | Q(end_date__gte=today))
+        ).exists():
             attrs.update({
                 "employee": employee, "location_obj": location,
                 "blocked": True,
@@ -709,8 +713,9 @@ class AttendanceCheckSerializer(serializers.Serializer):
             })
             return attrs
 
+        # يلزم وجود عقد نشط موقَّع من الموظف
         has_active_signed = contracts_qs.filter(
-            is_signed=True
+            signed_by_employee=True
         ).filter(
             Q(end_date__isnull=True) | Q(end_date__gte=today)
         ).exists()

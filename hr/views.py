@@ -10,10 +10,13 @@ from django.template.loader import render_to_string
 from django.utils import timezone
 from weasyprint import HTML, CSS
 from django.core.files import File
+from django.db import transaction, IntegrityError
+from django.contrib.auth import get_user_model
 
 from .forms import JobApplicationForm, EmployeeEducationForm, ContractForm
 from .models import JobApplication
 from api_guard.models import  Employee, AdditionalQualification, Contract
+from core.emailer import send_email_otp
 from django.http import JsonResponse, HttpResponseForbidden
 from django.views.decorators.csrf import csrf_exempt  # سنستخدمه لنداء fetch العام
 
@@ -133,6 +136,13 @@ def contract_sign_submit(request, pk):
         contract.signed_pdf.save(pdf_name, File(f), save=False)
     contract.save(update_fields=["signature_image", "signed_pdf"])
 
+    # بعد توقيع العقد: أنشئ/حدّث بيانات دخول تطبيق الحارس + أرسل بريدًا بالبيانات
+    try:
+        _onboard_employee_for_guard_app(contract.employee)
+    except Exception:
+        # لا تفشل العملية الأساسية عند فشل البريد/التحديث
+        pass
+
     messages.success(request, "تم توقيع العقد وتوليد نسخة PDF بنجاح.")
     return JsonResponse({"ok": True, "pdf_url": contract.signed_pdf.url})
 
@@ -204,4 +214,106 @@ def contract_sign_public_submit(request, pk, token):
         contract.signed_pdf.save(pdf_name, File(f), save=False)
     contract.save(update_fields=["signature_image", "signed_pdf", "sign_token", "sign_token_expires_at"])
 
+    # بعد توقيع العقد: أنشئ/حدّث بيانات دخول تطبيق الحارس + أرسل بريدًا بالبيانات
+    try:
+        _onboard_employee_for_guard_app(contract.employee)
+    except Exception:
+        pass
+
     return JsonResponse({"ok": True, "pdf_url": contract.signed_pdf.url})
+
+
+# ===== Onboarding helper: create username/password and email them =====
+def _random_password(length: int = 10) -> str:
+    import secrets, string
+    # مزيج أحرف كبيرة/صغيرة + أرقام لتجاوز محقق كلمات المرور
+    alphabet = string.ascii_letters + string.digits
+    while True:
+        pw = ''.join(secrets.choice(alphabet) for _ in range(max(8, length)))
+        # تضمن احتواءها على نوعين على الأقل
+        if (any(c.islower() for c in pw) and any(c.isupper() for c in pw) and any(c.isdigit() for c in pw)):
+            return pw
+
+
+def _onboard_employee_for_guard_app(employee: Employee) -> None:
+    if not employee or not getattr(employee, 'user', None):
+        return
+    user = employee.user
+    # أنشئ اسم مستخدم بصيغة sa + 6 أرقام عشوائية
+    def _random_guard_username() -> str:
+        import secrets, string
+        digits = string.digits
+        return 'sa' + ''.join(secrets.choice(digits) for _ in range(6))
+
+    UserModel = get_user_model()
+    desired_username = None
+    # حاول عدة مرات لضمان التفرد
+    for _ in range(10):
+        candidate = _random_guard_username()
+        if not UserModel.objects.filter(username__iexact=candidate).exists():
+            desired_username = candidate
+            break
+    if desired_username is None:
+        # احتمال نادر جدًا: فشل جميع المحاولات؛ استخدم آخر مرشح (قد يصطدم ونعيد المحاولة في except)
+        desired_username = _random_guard_username()
+
+    # حدّث اسم المستخدم إلى رقم التوظيف إن لزم
+    try:
+        with transaction.atomic():
+            if desired_username and user.username != desired_username:
+                user.username = desired_username
+            # أنشئ كلمة مرور مؤقتة
+            temp_pw = _random_password(12)
+            user.set_password(temp_pw)
+            user.save()
+    except IntegrityError:
+        # في حال اصطدام اسم المستخدم، أعِد توليده وجرب مرة إضافية
+        with transaction.atomic():
+            for _ in range(5):
+                alt = _random_guard_username()
+                if not UserModel.objects.filter(username__iexact=alt).exists():
+                    user.username = alt
+                    break
+            temp_pw = _random_password(12)
+            user.set_password(temp_pw)
+            user.save()
+
+    # حضّر نص البريد
+    to_email = (user.email or '').strip()
+    if not to_email:
+        # لا يوجد بريد—لا ترسل شيئًا
+        return
+
+    from django.conf import settings
+    app_link_lines = []
+    if getattr(settings, 'GUARD_APP_DOWNLOAD_URL', ''):
+        app_link_lines.append(f"رابط التطبيق: {settings.GUARD_APP_DOWNLOAD_URL}")
+    if getattr(settings, 'GUARD_APP_ANDROID_URL', ''):
+        app_link_lines.append(f"أندرويد: {settings.GUARD_APP_ANDROID_URL}")
+    if getattr(settings, 'GUARD_APP_IOS_URL', ''):
+        app_link_lines.append(f"iOS: {settings.GUARD_APP_IOS_URL}")
+    if not app_link_lines:
+        # كمل بموقع الشركة إن وُجد
+        site_url = getattr(settings, 'SITE_URL', '') or ''
+        if site_url:
+            app_link_lines.append(f"الموقع: {site_url}")
+
+    subject = "بيانات الدخول إلى تطبيق الحارس — سنام الأمن"
+    body_lines = [
+        f"مرحبًا {employee.full_name},",
+        "\nتم توثيق عقد عملك بنجاح.",
+        "\nبيانات الدخول إلى تطبيق الحارس:",
+        f"اسم المستخدم: {user.username}",
+        f"كلمة المرور المؤقتة: {temp_pw}",
+        "\nيرجى تغيير كلمة المرور بعد تسجيل الدخول.",
+    ]
+    if app_link_lines:
+        body_lines.extend(["\nروابط التحميل:", *app_link_lines])
+    body = "\n".join(body_lines)
+
+    # أرسل البريد (ستتم طباعة المحتوى في السجلات إذا لم تُضبط إعدادات SMTP وكان DEBUG_SMS_ECHO مفعلًا)
+    try:
+        send_email_otp(to_email, subject, body)
+    except Exception:
+        # لا ترفع الاستثناء حتى لا تعطل تجربة التوقيع
+        pass

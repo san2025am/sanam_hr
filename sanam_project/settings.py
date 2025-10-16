@@ -77,6 +77,11 @@ INTEGRITY_ALLOWED_VERDICTS = [s.strip() for s in _allowed_raw.split(",") if s.st
 MAXMIND_DB_PATH = os.getenv("MAXMIND_DB_PATH")
 IPINFO_TOKEN = os.getenv("IPINFO_TOKEN")
 
+# Mobile app download links (used in onboarding emails)
+GUARD_APP_DOWNLOAD_URL = os.getenv("GUARD_APP_DOWNLOAD_URL", "")
+GUARD_APP_ANDROID_URL = os.getenv("GUARD_APP_ANDROID_URL", "")
+GUARD_APP_IOS_URL = os.getenv("GUARD_APP_IOS_URL", "")
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
