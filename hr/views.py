@@ -15,7 +15,7 @@ from django.contrib.auth import get_user_model
 
 from .forms import JobApplicationForm, EmployeeEducationForm, ContractForm
 from .models import JobApplication
-from api_guard.models import  Employee, AdditionalQualification, Contract
+from api_guard.models import  Employee, AdditionalQualification, Contract, Role
 from core.emailer import send_email_otp
 from django.http import JsonResponse, HttpResponseForbidden
 from django.views.decorators.csrf import csrf_exempt  # سنستخدمه لنداء fetch العام
@@ -90,6 +90,9 @@ def contract_create(request):
 @require_http_methods(["GET"])
 def contract_sign(request, pk):
     contract = get_object_or_404(Contract, pk=pk)
+    # لا تسمح بتوقيع الموظف قبل توقيع الإدارة
+    if not contract.signed_by_company:
+        return HttpResponseForbidden("لم يتم توقيع الإدارة بعد. الرجاء انتظار توقيع الإدارة.")
     return render(request, "hr/contract_sign.html", {"contract": contract})
 
 
@@ -136,6 +139,16 @@ def contract_sign_submit(request, pk):
         contract.signed_pdf.save(pdf_name, File(f), save=False)
     contract.save(update_fields=["signature_image", "signed_pdf"])
 
+    # مزامنة الراتب مع جدول الرواتب بعد التوقيع
+    try:
+        from api_guard.models import Salary
+        sal, _ = Salary.objects.get_or_create(employee=contract.employee)
+        if contract.salary is not None:
+            sal.base_salary = contract.salary
+            sal.save(update_fields=["base_salary", "updated_at"]) if hasattr(sal, 'updated_at') else sal.save()
+    except Exception:
+        pass
+
     # بعد توقيع العقد: أنشئ/حدّث بيانات دخول تطبيق الحارس + أرسل بريدًا بالبيانات
     try:
         _onboard_employee_for_guard_app(contract.employee)
@@ -163,6 +176,8 @@ def contract_sign_public(request, pk, token):
     contract = get_object_or_404(Contract, pk=pk)
     if not _validate_token_or_403(contract, token):
         return HttpResponseForbidden("الرابط غير صالح أو منتهي الصلاحية.")
+    if not contract.signed_by_company:
+        return HttpResponseForbidden("لم يتم توقيع الإدارة بعد. الرجاء انتظار توقيع الإدارة.")
     # نفس القالب المستخدم مع تسجيل الدخول:
     return render(request, "hr/contract_sign.html", {"contract": contract, "public_token": token, "is_public": True})
 
@@ -223,6 +238,41 @@ def contract_sign_public_submit(request, pk, token):
     return JsonResponse({"ok": True, "pdf_url": contract.signed_pdf.url})
 
 
+# ===== توقيع الإدارة (داخل النظام) =====
+@login_required
+@require_http_methods(["GET"])
+def contract_company_sign(request, pk):
+    contract = get_object_or_404(Contract, pk=pk)
+    return render(request, "hr/contract_sign.html", {"contract": contract, "is_company": True})
+
+
+@login_required
+@require_http_methods(["POST"])
+def contract_company_sign_submit(request, pk):
+    contract = get_object_or_404(Contract, pk=pk)
+    data_url = request.POST.get("signature_data")
+    if not data_url or not data_url.startswith("data:image/png;base64,"):
+        return JsonResponse({"ok": False, "detail": "صيغة التوقيع غير صالحة."}, status=400)
+
+    b64 = data_url.split(',', 1)[1]
+    raw = base64.b64decode(b64)
+    ts = timezone.now().strftime("%Y%m%d%H%M%S")
+    sig_name = f"company_signature_{contract.pk}_{ts}.png"
+    sig_dir = os.path.join(settings.MEDIA_ROOT, "contracts", "company_signatures")
+    os.makedirs(sig_dir, exist_ok=True)
+    sig_path = os.path.join(sig_dir, sig_name)
+    with open(sig_path, "wb") as f:
+        f.write(raw)
+    with open(sig_path, "rb") as f:
+        contract.company_signature_image.save(sig_name, File(f), save=False)
+
+    contract.mark_company_signed(user=request.user)
+    contract.save(update_fields=["company_signature_image"])  # الحقل حُدّث أعلاه
+
+    messages.success(request, "تم توقيع الإدارة على العقد.")
+    return JsonResponse({"ok": True, "company_signed": True})
+
+
 # ===== Onboarding helper: create username/password and email them =====
 def _random_password(length: int = 10) -> str:
     import secrets, string
@@ -262,6 +312,14 @@ def _onboard_employee_for_guard_app(employee: Employee) -> None:
         with transaction.atomic():
             if desired_username and user.username != desired_username:
                 user.username = desired_username
+            # عيّن دور حارس أمن إن لم يكن معيّنًا
+            if not getattr(user, 'role_id', None):
+                try:
+                    guard_role = Role.objects.filter(name='guard').first()
+                    if guard_role:
+                        user.role = guard_role
+                except Exception:
+                    pass
             # أنشئ كلمة مرور مؤقتة
             temp_pw = _random_password(12)
             user.set_password(temp_pw)
@@ -274,6 +332,13 @@ def _onboard_employee_for_guard_app(employee: Employee) -> None:
                 if not UserModel.objects.filter(username__iexact=alt).exists():
                     user.username = alt
                     break
+            if not getattr(user, 'role_id', None):
+                try:
+                    guard_role = Role.objects.filter(name='guard').first()
+                    if guard_role:
+                        user.role = guard_role
+                except Exception:
+                    pass
             temp_pw = _random_password(12)
             user.set_password(temp_pw)
             user.save()
@@ -316,4 +381,13 @@ def _onboard_employee_for_guard_app(employee: Employee) -> None:
         send_email_otp(to_email, subject, body)
     except Exception:
         # لا ترفع الاستثناء حتى لا تعطل تجربة التوقيع
+        pass
+    # مزامنة الراتب مع جدول الرواتب بعد التوقيع
+    try:
+        from api_guard.models import Salary
+        sal, _ = Salary.objects.get_or_create(employee=contract.employee)
+        if contract.salary is not None:
+            sal.base_salary = contract.salary
+            sal.save(update_fields=["base_salary", "updated_at"]) if hasattr(sal, 'updated_at') else sal.save()
+    except Exception:
         pass

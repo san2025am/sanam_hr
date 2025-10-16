@@ -866,7 +866,8 @@ class AttendanceCheckSerializer(serializers.Serializer):
                     continue
             except Exception:
                 continue
-            if action == "check_in" and now_local > end_dt:
+            # إذا لم يتم تحديد checkin_grace نسمح بالحضور طوال نافذة الوردية (حتى مع post buffer)
+            if action == "check_in" and now_local > end_dt and (a.checkin_grace is not None):
                 continue
 
             ok = False
@@ -881,19 +882,26 @@ class AttendanceCheckSerializer(serializers.Serializer):
             if unrestricted:
                 ok = True
                 win_l = window_start
-                win_r = end_dt
+                # سماحات غير محددة ⇒ نافذة مفتوحة حتى نهاية post buffer
+                win_r = window_end
             else:
                 if action == "check_in":
-                    grace_min = int(a.checkin_grace or 0)
-                    win_l = window_start
-                    grace_end = start_dt + timedelta(minutes=grace_min) if grace_min > 0 else start_dt
-                    win_r = min(window_end, grace_end)
-                    ok = (win_l <= now_local <= win_r)
+                    # السياسة المطلوبة: إذا لم يُحدد checkin_grace ⇒ مسموح الحضور في أي وقت ضمن نافذة الوردية
+                    if a.checkin_grace is None:
+                        win_l = window_start
+                        win_r = window_end
+                        ok = (win_l <= now_local <= win_r)
+                    else:
+                        grace_min = int(a.checkin_grace or 0)
+                        win_l = window_start
+                        grace_end = start_dt + timedelta(minutes=grace_min) if grace_min > 0 else start_dt
+                        win_r = min(window_end, grace_end)
+                        ok = (win_l <= now_local <= win_r)
                 elif action in ("check_out", "early_check_out"):
                     # تفسير السياسة المطلوبة:
                     # - إذا تم تحديد سماح الانصراف (بالدقائق أو الساعات)، فإن الانصراف العادي مسموح
                     #   بعد مرور هذه المدة من بداية الوردية، حتى لو كان قبل وقت نهاية الوردية.
-                    # - إذا تُركت حقول السماح فارغة، يبقى الانصراف العادي منوطًا بنهاية الوردية.
+                    # - إذا تُركت حقول السماح فارغة، يكون الانصراف مسموحًا في أي وقت ضمن نافذة الوردية.
                     has_hours = (a.checkout_grace_hours is not None)
                     has_minutes = (a.checkout_grace is not None)
                     if has_hours:
@@ -902,17 +910,19 @@ class AttendanceCheckSerializer(serializers.Serializer):
                         threshold_min = int(a.checkout_grace)
                     else:
                         threshold_min = None
-                    earliest_by_threshold = (
-                        start_dt + timedelta(minutes=threshold_min)
-                        if threshold_min is not None else None
-                    )
-                    earliest = earliest_by_threshold if earliest_by_threshold is not None else end_dt
-                    win_l = earliest
-                    win_r = window_end
-                    if action == "check_out":
-                        ok = (win_l <= now_local <= window_end)
+                    if threshold_min is None:
+                        # سماح غير محدد ⇒ الانصراف متاح طوال نافذة الوردية لكلا نوعي الانصراف
+                        win_l = window_start
+                        win_r = window_end
+                        ok = (win_l <= now_local <= win_r)
                     else:
-                        ok = (window_start <= now_local <= window_end)
+                        earliest_by_threshold = start_dt + timedelta(minutes=threshold_min)
+                        win_l = earliest_by_threshold
+                        win_r = window_end
+                        if action == "check_out":
+                            ok = (win_l <= now_local <= window_end)
+                        else:
+                            ok = (window_start <= now_local <= window_end)
 
             if not ok:
                 if action == "check_in":

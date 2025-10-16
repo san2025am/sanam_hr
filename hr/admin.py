@@ -4,6 +4,12 @@ from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse, path
 from django import forms
 from django.contrib.auth import get_user_model
+from django.template.loader import render_to_string
+from django.conf import settings
+from django.utils import timezone
+from django.core.files import File
+from weasyprint import HTML, CSS
+import os
 
 from hr.utils.contracts import build_public_sign_url, one_year_period, render_contract_body, send_contract_email
 from hr.utils.notifications import send_status_email
@@ -129,7 +135,7 @@ class JobApplicationAdmin(admin.ModelAdmin):
 
     # إجراء: إنشاء عقد سنة + رابط توقيع + إرسال الرابط
     def create_year_contract_and_send_link(self, request, queryset):
-        ok, fail = 0, 0
+        ok, fail, skipped = 0, 0, 0
         for app in queryset:
             try:
                 # 1) يجب أن يكون الموظف مرتبطًا مسبقًا
@@ -138,32 +144,77 @@ class JobApplicationAdmin(admin.ModelAdmin):
                     self.message_user(request, f"لا يمكن إنشاء عقد: لا يوجد موظف مرتبط/مطابق لطلب {app.pk}", level=messages.ERROR)
                     fail += 1
                     continue
-                
-                # 2) عقد سنة
-                start_date, end_date = one_year_period()
-                body = render_contract_body(emp)
-                contract = Contract.objects.create(
-                    employee=emp,
-                    title="عقد عمل - حارس أمن (سنة)",
-                    contract_type="سنوي",
-                    start_date=start_date,
-                    end_date=end_date,
-                    salary=0,   # عدّل الراتب لاحقًا أو أضف حقل إدخال
-                    body=body,
-                )
+                # 2) تحقّق من وجود عقد قائم (غير منتهٍ)
+                from django.utils import timezone as dj_tz
+                today = dj_tz.localdate()
+                existing_qs = Contract.objects.filter(employee=emp, end_date__gte=today)
+                existing_open = existing_qs.filter(signed_by_employee=False).order_by('-start_date').first()
+                existing_active = existing_qs.filter(signed_by_employee=True).order_by('-start_date').first()
 
-                # 3) توليد رابط توقيع عام 72 ساعة
-                contract.generate_sign_link(hours_valid=72)
+                if existing_active and not existing_open:
+                    # يوجد عقد موقّع وساري — لا ننشئ جديدًا
+                    self.message_user(request, f"يوجد عقد ساري وموقّع لهذا الموظف. لا يمكن إنشاء عقد جديد حتى انتهاءه.", level=messages.WARNING)
+                    skipped += 1
+                    continue
+
+                if existing_open:
+                    # حدّث نص العقد وأعد إنشاء رابط التوقيع
+                    existing_open.body = render_contract_body(emp)
+                    existing_open.save(update_fields=['body'])
+                    existing_open.generate_sign_link(hours_valid=72)
+                    contract = existing_open
+                else:
+                    # 3) أنشئ عقد سنة جديد
+                    start_date, end_date = one_year_period()
+                    body = render_contract_body(emp)
+                    contract = Contract.objects.create(
+                        employee=emp,
+                        title="عقد عمل - حارس أمن (سنة)",
+                        contract_type="سنوي",
+                        start_date=start_date,
+                        end_date=end_date,
+                        salary=0,   # عدّل الراتب لاحقًا أو أضف حقل إدخال
+                        body=body,
+                    )
+                    contract.generate_sign_link(hours_valid=72)
                 link = build_public_sign_url(contract)
 
-                # 4) إرسال الإيميل باللينك (إن وُجد بريد)
-                if app.email:
+                # 4) إنشاء PDF مبدئي (غير موقّع) وحفظه في حقل الملف
+                try:
+                    ts = timezone.now().strftime("%Y%m%d%H%M%S")
+                    html_str = render_to_string(
+                        "hr/contract_pdf_template.html",
+                        {
+                            "contract": contract,
+                            "signed_at": None,
+                            "signature_url": None,
+                            "company_name": "شركة سنام للأمن",
+                        },
+                    )
+                    unsigned_dir = os.path.join(settings.MEDIA_ROOT, "contracts", "unsigned")
+                    os.makedirs(unsigned_dir, exist_ok=True)
+                    unsigned_name = f"contract_{contract.pk}_draft_{ts}.pdf"
+                    unsigned_path = os.path.join(unsigned_dir, unsigned_name)
+                    HTML(string=html_str, base_url=request.build_absolute_uri('/')).write_pdf(
+                        unsigned_path,
+                        stylesheets=[CSS(string='@page { size: A4; margin: 20mm; } body { font-family: "Tajawal", Arial, sans-serif; }')]
+                    )
+                    with open(unsigned_path, "rb") as f:
+                        contract.file.save(unsigned_name, File(f), save=True)
+                except Exception:
+                    # غير حرِج: لو فشل، نكمل بدون ملف
+                    pass
+
+                # 5) إرسال الإيميل باللينك (إن وُجد بريد) — فقط بعد توقيع الإدارة
+                if not contract.signed_by_company:
+                    self.message_user(request, f"تم تجهيز العقد، يُرجى توقيع الإدارة قبل الإرسال.", level=messages.INFO)
+                elif app.email:
                     send_contract_email(app.email, emp.full_name, link)
 
                 ok += 1
             except Exception:
                 fail += 1
-        self.message_user(request, f"تم إنشاء وإرسال {ok} عقد/روابط. فشل {fail}.")
+        self.message_user(request, f"تم تجهيز {ok} عقد/روابط. تخطّي {skipped}، فشل {fail}.")
     create_year_contract_and_send_link.short_description = "إنشاء عقد سنة + إرسال رابط التوقيع"
 
     # إجراء: تهيئة موظف وفتح صفحة إضافة عقد

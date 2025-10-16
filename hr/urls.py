@@ -11,5 +11,8 @@ urlpatterns = [
     path("contracts/<int:pk>/sign/submit/", views.contract_sign_submit, name="contract_sign_submit"),
     path("contracts/<int:pk>/sign/<slug:token>/", views.contract_sign_public, name="contract_sign_public"),
     path("contracts/<int:pk>/sign/<slug:token>/submit/", views.contract_sign_public_submit, name="contract_sign_public_submit"),
+    # توقيع الإدارة
+    path("contracts/<int:pk>/company-sign/", views.contract_company_sign, name="contract_company_sign"),
+    path("contracts/<int:pk>/company-sign/submit/", views.contract_company_sign_submit, name="contract_company_sign_submit"),
 
 ]

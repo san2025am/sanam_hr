@@ -543,9 +543,11 @@ class EmployeeViolationAdmin(admin.ModelAdmin):
 class ContractAdmin(admin.ModelAdmin):
     list_display = ("employee", "title", "start_date", "end_date", "salary",
                     "signed_by_employee", "signed_by_company", "sign_link")
-    readonly_fields = ("quick_tools",)  # حقل أزرار سريع للعرض فقط
+    readonly_fields = ("quick_tools", "company_signed_at", "company_signed_by")  # حقول للعرض فقط
     fields = ("employee", "title", "contract_type", "start_date", "end_date", "salary",
-              "file", "body", "signed_by_employee", "signed_by_company",
+              "file", "body",
+              "company_signature_image", "signed_by_company", "company_signed_at", "company_signed_by",
+              "signed_by_employee",
               "quick_tools")  # ضفّه آخر النموذج
 
     def get_urls(self):
@@ -555,6 +557,25 @@ class ContractAdmin(admin.ModelAdmin):
             path("<int:pk>/send-link/", self.admin_site.admin_view(self.send_link_view), name="hr_contract_send_link"),
         ]
         return my + urls
+
+    def save_model(self, request, obj, form, change):
+        # عند رفع توقيع الإدارة أو تفعيل حالة توقيع الإدارة، سجّل الموقّع والتاريخ
+        super().save_model(request, obj, form, change)
+        should_mark = False
+        try:
+            # إذا تم رفع صورة توقيع الإدارة الآن
+            if 'company_signature_image' in form.changed_data and obj.company_signature_image:
+                should_mark = True
+            # أو إذا قام المسؤول بتفعيل مربع signed_by_company يدويًا
+            if 'signed_by_company' in form.changed_data and obj.signed_by_company:
+                should_mark = True
+        except Exception:
+            pass
+        if should_mark and not obj.company_signed_at:
+            try:
+                obj.mark_company_signed(user=request.user)
+            except Exception:
+                pass
 
     def quick_tools(self, obj):
         # عند الإضافة لأول مرة أو قبل حفظ الكائن لا يوجد pk ⇒ لا روابط أدوات
@@ -584,6 +605,9 @@ class ContractAdmin(admin.ModelAdmin):
 
     def send_link_view(self, request, pk):
         c = get_object_or_404(Contract, pk=pk)
+        if not c.signed_by_company:
+            messages.error(request, "لا يمكن إرسال رابط توقيع الموظف قبل توقيع الإدارة.")
+            return redirect(reverse("admin:api_guard_contract_change", args=[pk]))
         # تأكد من وجود توكن صالح، وإن لم يوجد أنشئه
         if not c.sign_token or not c.sign_token_expires_at:
             c.generate_sign_link(hours_valid=72)

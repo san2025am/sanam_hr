@@ -1979,7 +1979,8 @@ class LocationPingAPIView(APIView):
                             th_min = int(assignment.checkout_grace)
                             earliest_checkout = sdt + timedelta(minutes=th_min)
                         else:
-                            earliest_checkout = edt
+                            # السياسة المطلوبة: إذا لم يُحدد سماح الانصراف ⇒ الانصراف مسموح من بداية نافذة الوردية
+                            earliest_checkout = sdt
             if earliest_checkout is not None:
                 monitoring_payload["earliest_checkout_at"] = _local_iso(earliest_checkout)
         except Exception:

@@ -1066,6 +1066,10 @@ class Contract(models.Model):
 
     signed_by_employee = models.BooleanField(default=False, verbose_name="توقيع الموظف")
     signed_by_company = models.BooleanField(default=False, verbose_name="توقيع الشركة")
+    # توقيع الإدارة وصاحب التوقيع ووقته
+    company_signature_image = models.ImageField(upload_to="contracts/company_signatures/", blank=True, null=True, verbose_name="توقيع الإدارة")
+    company_signed_at = models.DateTimeField(blank=True, null=True, verbose_name="وقت توقيع الإدارة")
+    company_signed_by = models.ForeignKey('api_guard.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='company_signed_contracts', verbose_name="وقّعه من الإدارة")
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="أُنشئ في")
     sign_token = models.CharField(max_length=64, blank=True, null=True, unique=True, verbose_name="رمز توقيع عام")
     sign_token_expires_at = models.DateTimeField(blank=True, null=True, verbose_name="صلاحية رابط التوقيع")
@@ -1081,6 +1085,31 @@ class Contract(models.Model):
         if not self.signed_at:
             self.signed_at = timezone.now()
         self.save(update_fields=["signed_by_employee", "signed_at"])
+
+    def mark_company_signed(self, *, user=None):
+        self.signed_by_company = True
+        self.company_signed_at = timezone.now()
+        if user is not None:
+            try:
+                self.company_signed_by = user
+            except Exception:
+                pass
+        self.save(update_fields=["signed_by_company", "company_signed_at", "company_signed_by"])
+
+    def clean(self):
+        # عدم السماح بعقود متداخلة لنفس الموظف
+        from django.core.exceptions import ValidationError
+        s = self.start_date
+        e = self.end_date or self.start_date
+        if s is None:
+            return
+        qs = Contract.objects.filter(employee=self.employee)
+        if self.pk:
+            qs = qs.exclude(pk=self.pk)
+        # تداخل: (start1 <= end2) و (start2 <= end1)
+        has_overlap = qs.filter(start_date__lte=e, end_date__gte=s).exists() if e else qs.filter(end_date__isnull=True, start_date__lte=e).exists()
+        if has_overlap:
+            raise ValidationError({"start_date": "يوجد عقد ساري أو متداخل لنفس الموظف. عدّل العقد الحالي بدل إنشاء عقد جديد."})
 
     def __str__(self): return f"عقد الموظف {self.employee.full_name}"
 
