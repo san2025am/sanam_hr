@@ -68,7 +68,10 @@
     const dataUrl = canvas.toDataURL('image/png');
     const form = new FormData();
     form.append('signature_data', dataUrl);
-    {% if is_public and public_token %}
+    {% if is_company %}
+      const url = "{% url 'contract_company_sign_submit' contract.pk %}";
+      form.append('csrfmiddlewaretoken', '{{ csrf_token }}');
+    {% elif is_public and public_token %}
       const url = "{% url 'contract_sign_public_submit' contract.pk public_token %}";
     {% else %}
       const url = "{% url 'contract_sign_submit' contract.pk %}";

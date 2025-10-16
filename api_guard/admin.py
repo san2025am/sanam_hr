@@ -583,10 +583,12 @@ class ContractAdmin(admin.ModelAdmin):
             return "—"
         gen_url = reverse("admin:hr_contract_gen_token", args=[obj.pk])
         send_url = reverse("admin:hr_contract_send_link", args=[obj.pk])
+        company_url = reverse("contract_company_sign", args=[obj.pk])
         return format_html(
+            '<a class="button" href="{}" target="_blank">✍️ توقيع الإدارة</a>&nbsp;'
             '<a class="button" href="{}">🔗 توليد/تجديد رابط التوقيع (72س)</a>&nbsp;'
             '<a class="button" href="{}">✉️ إرسال الرابط إلى البريد</a>',
-            gen_url, send_url
+            company_url, gen_url, send_url
         )
     quick_tools.short_description = "أدوات سريعة"
 
