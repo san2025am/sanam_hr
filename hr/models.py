@@ -43,6 +43,45 @@ class JobApplication(models.Model):
     def __str__(self):
         return f"{self.full_name} – {self.get_position_display()}"
 
+    def clean(self):
+        """
+        منع تكرار بيانات التقديم: رقم الهوية، رقم الجوال، البريد الإلكتروني.
+        كما نمنع التقديم بنفس البيانات إن كانت موجودة في سجلات الموظفين/المستخدمين.
+        """
+        super().clean()
+        from django.core.exceptions import ValidationError
+        from django.contrib.auth import get_user_model
+        from api_guard.models import Employee as _Emp
+
+        nid = (self.national_id or "").strip()
+        phone = (self.phone or "").strip()
+        email = (self.email or "").strip().lower()
+
+        qs = JobApplication.objects.all()
+        if self.pk:
+            qs = qs.exclude(pk=self.pk)
+
+        errors = {}
+        if nid and qs.filter(national_id=nid).exists():
+            errors["national_id"] = "رقم الهوية مستخدم في طلب سابق."
+        if phone and qs.filter(phone=phone).exists():
+            errors["phone"] = "رقم الجوال مستخدم في طلب سابق."
+        if email and qs.filter(email__iexact=email).exists():
+            errors["email"] = "البريد الإلكتروني مستخدم في طلب سابق."
+
+        # تفادي تعارض مع سجلات الموظفين/الحسابات
+        if nid and _Emp.objects.filter(national_id=nid).exists():
+            errors.setdefault("national_id", "رقم الهوية مرتبط بموظف قائم.")
+        if phone and _Emp.objects.filter(phone_number=phone).exists():
+            errors.setdefault("phone", "رقم الجوال مرتبط بموظف قائم.")
+        if email:
+            User = get_user_model()
+            if User.objects.filter(email__iexact=email).exists():
+                errors.setdefault("email", "البريد الإلكتروني مرتبط بحساب قائم.")
+
+        if errors:
+            raise ValidationError(errors)
+
 
 # ===== إلحاق الموظف تلقائيًا بعد قبول الطلب =====
 @receiver(post_save, sender=JobApplication)
@@ -55,7 +94,11 @@ def ensure_employee_on_accept(sender, instance: JobApplication, created: bool, *
         if instance.employee_id:
             return
         # ابحث عن موظف موجود عبر رقم الهوية لتجنّب التكرار
-        emp = Employee.objects.filter(national_id=instance.national_id).first()
+        # لا تربط إلا إذا تطابق رقم الهوية ورقم الجوال معًا لتفادي الربط الخاطئ
+        emp = Employee.objects.filter(
+            national_id=instance.national_id,
+            phone_number=instance.phone,
+        ).first()
         if not emp:
             # أنشئ User + Employee
             UserModel = get_user_model()

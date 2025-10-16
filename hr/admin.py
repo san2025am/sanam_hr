@@ -64,7 +64,11 @@ class JobApplicationAdmin(admin.ModelAdmin):
 
         # عند التحويل إلى "مقبول": اربط الموظف أو أنشئه إذا لم يكن موجودًا
         if status_changed and obj.status == JobApplication.Status.ACCEPTED:
-            emp = obj.employee or Employee.objects.filter(national_id=obj.national_id).first()
+            # لا تربط إلا إذا طابق رقم الهوية ورقم الجوال معًا لتجنب ربط خاطئ
+            emp = obj.employee or Employee.objects.filter(
+                national_id=obj.national_id,
+                phone_number=obj.phone,
+            ).first()
             if not emp:
                 # أنشئ User + Employee من بيانات الطلب
                 UserModel = get_user_model()
@@ -139,7 +143,10 @@ class JobApplicationAdmin(admin.ModelAdmin):
         for app in queryset:
             try:
                 # 1) يجب أن يكون الموظف مرتبطًا مسبقًا
-                emp = app.employee or Employee.objects.filter(national_id=app.national_id).first()
+                emp = app.employee or Employee.objects.filter(
+                    national_id=app.national_id,
+                    phone_number=app.phone,
+                ).first()
                 if not emp:
                     self.message_user(request, f"لا يمكن إنشاء عقد: لا يوجد موظف مرتبط/مطابق لطلب {app.pk}", level=messages.ERROR)
                     fail += 1
