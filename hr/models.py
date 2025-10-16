@@ -4,7 +4,10 @@ from django.db import models
 from django.utils.translation import gettext_lazy as _
 from django.utils import timezone
 
-from api_guard.models import Employee
+from api_guard.models import Employee, Role
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+from django.contrib.auth import get_user_model
 
 # في حال لديك Employee جاهز في تطبيق آخر، استبدل هذا النموذج بربط ForeignKey/N:1 لنموذجك.
 
@@ -40,3 +43,55 @@ class JobApplication(models.Model):
     def __str__(self):
         return f"{self.full_name} – {self.get_position_display()}"
 
+
+# ===== إلحاق الموظف تلقائيًا بعد قبول الطلب =====
+@receiver(post_save, sender=JobApplication)
+def ensure_employee_on_accept(sender, instance: JobApplication, created: bool, **kwargs):
+    try:
+        # نفعّل فقط عند حالة "مقبول"
+        if (instance.status or '').strip() != JobApplication.Status.ACCEPTED:
+            return
+        # إن كان مرتبطًا مسبقًا — لا شيء
+        if instance.employee_id:
+            return
+        # ابحث عن موظف موجود عبر رقم الهوية لتجنّب التكرار
+        emp = Employee.objects.filter(national_id=instance.national_id).first()
+        if not emp:
+            # أنشئ User + Employee
+            UserModel = get_user_model()
+            import secrets, string
+            def _gen_username():
+                return 'sa' + ''.join(secrets.choice(string.digits) for _ in range(6))
+            username = None
+            for _ in range(10):
+                cand = _gen_username()
+                if not UserModel.objects.filter(username__iexact=cand).exists():
+                    username = cand
+                    break
+            username = username or _gen_username()
+
+            user = UserModel.objects.create(
+                username=username,
+                email=(instance.email or '').strip(),
+            )
+            # عيّن دور حارس إن وجد
+            try:
+                guard_role = Role.objects.filter(name='guard').first()
+                if guard_role:
+                    user.role = guard_role
+                    user.save(update_fields=['role'])
+            except Exception:
+                pass
+
+            emp = Employee.objects.create(
+                user=user,
+                full_name=instance.full_name,
+                national_id=instance.national_id,
+                phone_number=instance.phone,
+            )
+        # اربط الطلب بالموظف
+        if not instance.employee_id and emp:
+            JobApplication.objects.filter(pk=instance.pk).update(employee=emp)
+    except Exception:
+        # لا تُعطّل الحفظ لو حدث خطأ — يمكن للإداري إصلاحها يدويًا
+        pass

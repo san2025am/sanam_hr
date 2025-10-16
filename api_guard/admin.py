@@ -541,6 +541,7 @@ class EmployeeViolationAdmin(admin.ModelAdmin):
 
 @admin.register(Contract)
 class ContractAdmin(admin.ModelAdmin):
+    autocomplete_fields = ('employee',)
     list_display = ("employee", "title", "start_date", "end_date", "salary",
                     "signed_by_employee", "signed_by_company", "sign_link")
     readonly_fields = ("quick_tools", "company_signed_at", "company_signed_by")  # حقول للعرض فقط
