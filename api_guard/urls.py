@@ -22,6 +22,7 @@ from api_guard.views import (
     PasswordResetUsernameView,
     ResolveLocationAPIView,
     LocationPingAPIView,
+    GeofenceViolationPauseAPIView,
 )
 
 
@@ -40,6 +41,7 @@ urlpatterns = [
 
     path("attendance/resolve-location/", ResolveLocationAPIView.as_view(), name="resolve-location"),
     path("attendance/location-ping/", LocationPingAPIView.as_view(), name="attendance-location-ping"),
+    path("attendance/violation-pause/", GeofenceViolationPauseAPIView.as_view(), name="attendance-violation-pause"),
     path("guards/reports/", GuardReportListCreateView.as_view(), name="guard-reports"),
     path("guards/requests/", GuardRequestListCreateView.as_view(), name="guard-requests"),
     path("guards/advances/", GuardAdvanceListCreateView.as_view(), name="guard-advances"),

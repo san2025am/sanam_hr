@@ -18,7 +18,8 @@ from .models import (
     ViolationRule, EmployeeViolation,  # <-- الجديد بدل Violation
     Contract, Advance, Custody, LogisticRequest,
     UniformItem, UniformDelivery, UniformDeliveryItem,
-    TrustedDevice, DeviceLoginChallenge
+    TrustedDevice, DeviceLoginChallenge,
+    TrackingIncident,
 )
 from .models import ReportMessage, TaskUpdateLog
 try:
@@ -428,6 +429,16 @@ class AttendanceRecordAdmin(admin.ModelAdmin):
 class LocationPingAdmin(admin.ModelAdmin):
     list_display = ('employee', 'location', 'recorded_at', 'within_radius', 'distance_m', 'violation_triggered')
     list_filter = ('within_radius', 'violation_triggered', 'location')
+    search_fields = ('employee__full_name', 'location__name')
+    autocomplete_fields = ('employee', 'location')
+    ordering = ['-recorded_at']
+
+@admin.register(TrackingIncident)
+class TrackingIncidentAdmin(admin.ModelAdmin):
+    list_display = (
+        'employee', 'location', 'incident_type', 'recorded_at', 'gap_minutes', 'timeout_minutes'
+    )
+    list_filter = ('incident_type', 'location')
     search_fields = ('employee__full_name', 'location__name')
     autocomplete_fields = ('employee', 'location')
     ordering = ['-recorded_at']

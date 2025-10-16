@@ -697,6 +697,43 @@ class LocationPing(BaseModel):
         return f"{self.employee.full_name} @ {self.recorded_at:%Y-%m-%d %H:%M} ({status})"
 
 
+class TrackingIncident(BaseModel):
+    """
+    يسجّل أحداث تتبع تقنية/تشغيلية (مثل انقطاع النبضات).
+    """
+    class IncidentType(models.TextChoices):
+        HEARTBEAT_TIMEOUT = "heartbeat_timeout", "انقطاع نبضات"
+
+    employee = models.ForeignKey(
+        Employee,
+        on_delete=models.CASCADE,
+        related_name="tracking_incidents",
+        verbose_name="الموظف",
+    )
+    location = models.ForeignKey(
+        Location,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="tracking_incidents",
+        verbose_name="الموقع",
+    )
+    incident_type = models.CharField(max_length=50, choices=IncidentType.choices, verbose_name="نوع الحدث")
+    recorded_at = models.DateTimeField(default=timezone.now, verbose_name="وقت الرصد")
+    gap_minutes = models.FloatField(null=True, blank=True, verbose_name="مدة الانقطاع (دقائق)")
+    timeout_minutes = models.PositiveIntegerField(null=True, blank=True, verbose_name="مهلة الإعداد (دقائق)")
+    note = models.TextField(blank=True, null=True, verbose_name="ملاحظة")
+    data = models.JSONField(null=True, blank=True, verbose_name="بيانات إضافية")
+
+    class Meta:
+        verbose_name = "7.3 حدث تتبع"
+        verbose_name_plural = "7.3 أحداث التتبع"
+        ordering = ["-recorded_at"]
+
+    def __str__(self):
+        return f"{self.get_incident_type_display()} — {self.employee.full_name} @ {self.recorded_at:%Y-%m-%d %H:%M}"
+
+
 class Salary(BaseModel):
     employee = models.OneToOneField(Employee, on_delete=models.CASCADE,verbose_name="الموظف")
     base_salary = models.DecimalField(max_digits=10, decimal_places=2, default=0, verbose_name="الراتب الأساسي")

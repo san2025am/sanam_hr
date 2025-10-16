@@ -1185,13 +1185,33 @@ class GeofenceViolationPauseRequestSerializer(serializers.Serializer):
     )
     reason = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=500)
     location_id = serializers.UUIDField(required=False, allow_null=True)
+    # يتيح للمشرف/الإداري تحديد موظف آخر لإيقاف/استئناف المخالفة
+    employee_id = serializers.UUIDField(required=False, allow_null=True)
 
     def validate(self, attrs):
         request = self.context["request"]
+        # من يحدّد الموظف؟
+        # - الحارس العادي: نفسه فقط
+        # - المشرف/الـ HR/مدير العمليات أو المستخدم الإداري: يسمح بتمرير employee_id
+        can_manage_others = False
         try:
-            employee = Employee.objects.select_related("user").get(user=request.user)
-        except Employee.DoesNotExist:
-            raise serializers.ValidationError({"detail": "لا يوجد ملف موظف مرتبط بالحساب."})
+            role_name = (getattr(getattr(request.user, 'role', None), 'name', '') or '').strip().lower()
+            can_manage_others = request.user.is_staff or role_name in {"supervisor", "ops_manager", "hr"}
+        except Exception:
+            can_manage_others = bool(getattr(request.user, 'is_staff', False))
+
+        emp_obj = None
+        target_emp_id = attrs.get("employee_id")
+        if target_emp_id and can_manage_others:
+            try:
+                emp_obj = Employee.objects.select_related("user").get(id=target_emp_id)
+            except Employee.DoesNotExist:
+                raise serializers.ValidationError({"employee_id": "الموظف غير موجود."})
+        else:
+            try:
+                emp_obj = Employee.objects.select_related("user").get(user=request.user)
+            except Employee.DoesNotExist:
+                raise serializers.ValidationError({"detail": "لا يوجد ملف موظف مرتبط بالحساب."})
 
         location_obj = None
         location_id = attrs.get("location_id")
@@ -1216,7 +1236,7 @@ class GeofenceViolationPauseRequestSerializer(serializers.Serializer):
             reason = reason.strip()
             attrs["reason"] = reason
 
-        attrs["employee"] = employee
+        attrs["employee"] = emp_obj
         attrs["location_obj"] = location_obj
         return attrs
 

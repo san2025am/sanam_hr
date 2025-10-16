@@ -58,6 +58,7 @@ from .models import (
     EmployeeShiftAssignment,
     Shift,
     GeofenceViolationPause,
+    TrackingIncident,
     ShiftAbsenceLog,
     TaskUpdateLog,
 )
@@ -77,6 +78,7 @@ from .serializers import (
     EmployeeMeSerializer,
     TaskMiniSerializer,
     GuardTaskUpdateSerializer,
+    GeofenceViolationPauseRequestSerializer,
 )
 
 from core.emailer import (
@@ -172,6 +174,34 @@ def _create_geofence_violation_record(
         logger.exception("Failed to create geofence EmployeeViolation record")
         return None
 
+
+def _create_tracking_incident(*, employee: Employee, location: Optional[Location], kind: str,
+                              recorded_at, gap_minutes: Optional[float] = None,
+                              timeout_minutes: Optional[int] = None,
+                              note: Optional[str] = None, data: Optional[dict] = None) -> Optional[TrackingIncident]:
+    """ينشئ حدث تتبّع (مثل انقطاع نبضات). يتجنّب التكرار خلال 30 دقيقة."""
+    try:
+        from django.utils import timezone as _tz
+        recent_since = _tz.now() - _tz.timedelta(minutes=30)
+        if TrackingIncident.objects.filter(
+            employee=employee,
+            incident_type=kind,
+            recorded_at__gte=recent_since,
+        ).exists():
+            return None
+        return TrackingIncident.objects.create(
+            employee=employee,
+            location=location,
+            incident_type=kind,
+            recorded_at=recorded_at,
+            gap_minutes=gap_minutes,
+            timeout_minutes=timeout_minutes,
+            note=note,
+            data=data,
+        )
+    except Exception:
+        logger_api.info("Failed to create TrackingIncident", exc_info=True)
+        return None
 
 def _make_aware(dt_value):
     if dt_value is None:
@@ -1897,6 +1927,30 @@ class LocationPingAPIView(APIView):
                 pass
         if heartbeat_timed_out:
             tracking_active = False
+            # سجّل حدث انقطاع نبضات (Heartbeat timeout)
+            try:
+                last_ping2 = (
+                    LocationPing.objects
+                    .filter(employee=employee)
+                    .order_by('-recorded_at')
+                    .first()
+                )
+                gap_min = None
+                if last_ping2 is not None:
+                    last_aw2 = _make_aware(last_ping2.recorded_at)
+                    gap_min = (recorded_at - last_aw2).total_seconds() / 60.0
+                _create_tracking_incident(
+                    employee=employee,
+                    location=loc,
+                    kind=TrackingIncident.IncidentType.HEARTBEAT_TIMEOUT,
+                    recorded_at=recorded_at,
+                    gap_minutes=gap_min,
+                    timeout_minutes=heartbeat_timeout_minutes,
+                    note="انقطاع نبضات قبل هذه النبضة",
+                    data={"tracking_start_mode": tracking_mode},
+                )
+            except Exception:
+                pass
 
         monitoring_payload = dict(monitoring_payload or {})
         monitoring_payload.update({
@@ -1969,6 +2023,42 @@ class LocationPingAPIView(APIView):
             end_buf = end + timedelta(minutes=post_buf or 0)
             if not (start_buf <= now <= end_buf):
                 return fail('خارج وقت الوردية', code='outside_shift', status=400)
+
+        # منع السبام: ارفض النبضة إذا كانت أقرب من الحد الأدنى المسموح (مع هامش سماح)
+        try:
+            if tracking_active and monitoring_ping_seconds:
+                margin = float(getattr(settings, "PING_INTERVAL_MARGIN_FACTOR", 0.8) or 0.8)
+                if margin < 0.5:
+                    margin = 0.5
+                if margin > 1.0:
+                    margin = 1.0
+                min_interval = int(round(monitoring_ping_seconds * margin))
+                prev = (
+                    LocationPing.objects
+                    .filter(employee=employee)
+                    .order_by('-recorded_at')
+                    .first()
+                )
+                if prev is not None:
+                    prev_aw = _make_aware(prev.recorded_at)
+                    delta_s = max(0, int((recorded_at - prev_aw).total_seconds()))
+                    if delta_s < min_interval:
+                        next_s = max(1, min_interval - delta_s)
+                        payload2 = dict(monitoring_payload or {})
+                        payload2["suggested_outside_ping_seconds"] = monitoring_outside_seconds or monitoring_ping_seconds
+                        return Response({
+                            "ok": False,
+                            "detail": "Ping مُتقارب جدًا — يُرجى الانتظار قبل الإرسال التالي.",
+                            "code": "PING_TOO_CLOSE",
+                            "min_interval_seconds": monitoring_ping_seconds,
+                            "margin_factor": margin,
+                            "delta_seconds": delta_s,
+                            "next_ping_seconds": next_s,
+                            "monitoring": payload2,
+                            "should_monitor_location": tracking_active,
+                        }, status=status.HTTP_200_OK)
+        except Exception:
+            pass
 
         ping = LocationPing.objects.create(
             employee=employee,
@@ -2580,6 +2670,68 @@ class GuardRequestListCreateView(OptimizedQuerysetMixin, APIView):
         ser.is_valid(raise_exception=True)
         ser.save(employee=employee)
         return Response(ser.data, status=status.HTTP_201_CREATED)
+
+
+class GeofenceViolationPauseAPIView(APIView):
+    """
+    تمكين المشرف/HR/مدير العمليات من إيقاف/استئناف تسجيل مخالفة الانسحاب للحارس.
+    الحارس نفسه يمكنه طلب إيقاف لنفسه فقط.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        s = GeofenceViolationPauseRequestSerializer(data=request.data, context={"request": request})
+        if not s.is_valid():
+            return Response({"detail": s.errors}, status=status.HTTP_400_BAD_REQUEST)
+
+        employee_obj = s.validated_data["employee"]
+        location_obj = s.validated_data.get("location_obj")
+        action = s.validated_data["action"]
+        reason = s.validated_data.get("reason")
+        duration = s.validated_data.get("duration_minutes")
+
+        if action == "pause":
+            pause = GeofenceViolationPause.create_or_extend(
+                employee=employee_obj,
+                location=location_obj,
+                duration_minutes=int(duration),
+                reason=reason,
+                created_by=getattr(request, "user", None),
+                start_at=dj_timezone.now(),
+            )
+            return Response({
+                "ok": True,
+                "action": "pause",
+                "violation_paused": True,
+                "employee_id": str(employee_obj.id),
+                "location_id": str(getattr(location_obj, 'id', '')) if location_obj else None,
+                "pause_started_at": _local_iso(pause.pause_started_at),
+                "pause_until": _local_iso(pause.pause_until),
+                "duration_minutes": pause.duration_minutes,
+                "reason": pause.reason,
+            }, status=status.HTTP_200_OK)
+
+        # resume
+        active = GeofenceViolationPause.active_for(employee=employee_obj, location=location_obj)
+        if not active:
+            return Response({
+                "ok": True,
+                "action": "resume",
+                "violation_paused": False,
+                "detail": "لا يوجد إيقاف فعال",
+                "employee_id": str(employee_obj.id),
+                "location_id": str(getattr(location_obj, 'id', '')) if location_obj else None,
+            }, status=status.HTTP_200_OK)
+
+        active.mark_resumed()
+        return Response({
+            "ok": True,
+            "action": "resume",
+            "violation_paused": False,
+            "employee_id": str(employee_obj.id),
+            "location_id": str(getattr(location_obj, 'id', '')) if location_obj else None,
+            "resumed_at": _local_iso(active.resumed_at),
+        }, status=status.HTTP_200_OK)
 
 
 class GuardAdvanceListCreateView(OptimizedQuerysetMixin, APIView):
