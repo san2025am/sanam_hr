@@ -99,6 +99,19 @@ if '31.97.158.157' not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append('31.97.158.157')
 # Application definition
 
+# Public base URL used in emails/links (e.g., contract sign links)
+def _compute_default_site_url():
+    raw = os.getenv('SITE_URL')
+    if raw:
+        return raw.rstrip('/')
+    # pick first non-local host if available
+    non_local = [h for h in ALLOWED_HOSTS if h not in ('localhost', '127.0.0.1', '::1', '[::1]')]
+    host = (non_local[0] if non_local else (ALLOWED_HOSTS[0] if ALLOWED_HOSTS else 'localhost'))
+    scheme = 'https' if _env_bool('FORCE_HTTPS', False) else 'http'
+    return f"{scheme}://{host}"
+
+SITE_URL = _compute_default_site_url()
+
 _HAS_JAZZMIN = importlib.util.find_spec('jazzmin') is not None
 
 INSTALLED_APPS = [

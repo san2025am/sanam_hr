@@ -3,12 +3,13 @@ from django.utils.html import format_html
 from django.shortcuts import get_object_or_404, redirect
 from django.urls import reverse, path
 from django import forms
+from django.contrib.auth import get_user_model
 
 from hr.utils.contracts import build_public_sign_url, one_year_period, render_contract_body, send_contract_email
 from hr.utils.notifications import send_status_email
 
 from .models import JobApplication
-from api_guard.models import Contract, Employee
+from api_guard.models import Contract, Employee, Role
 
 class JobApplicationAdminForm(forms.ModelForm):
     send_email_now = forms.BooleanField(
@@ -55,14 +56,47 @@ class JobApplicationAdmin(admin.ModelAdmin):
 
         super().save_model(request, obj, form, change)
 
-        # عند التحويل إلى "مقبول": اربط الموظف إن كان موجودًا فقط (لا ننشئ موظفًا من HR)
+        # عند التحويل إلى "مقبول": اربط الموظف أو أنشئه إذا لم يكن موجودًا
         if status_changed and obj.status == JobApplication.Status.ACCEPTED:
-            emp = obj.employee
+            emp = obj.employee or Employee.objects.filter(national_id=obj.national_id).first()
             if not emp:
-                emp = Employee.objects.filter(national_id=obj.national_id).first()
-                if emp:
-                    obj.employee = emp
-                    obj.save(update_fields=["employee"])
+                # أنشئ User + Employee من بيانات الطلب
+                UserModel = get_user_model()
+                # توليد اسم مستخدم بصيغة sa+6 أرقام بشكل فريد
+                import secrets, string
+                def _gen_username():
+                    return 'sa' + ''.join(secrets.choice(string.digits) for _ in range(6))
+                username = None
+                for _ in range(10):
+                    cand = _gen_username()
+                    if not UserModel.objects.filter(username__iexact=cand).exists():
+                        username = cand
+                        break
+                if username is None:
+                    username = _gen_username()
+
+                user = UserModel.objects.create(
+                    username=username,
+                    email=(obj.email or '').strip(),
+                )
+                # عيّن دور الحارس إن وُجد
+                try:
+                    guard_role = Role.objects.filter(name='guard').first()
+                    if guard_role:
+                        user.role = guard_role
+                        user.save(update_fields=['role'])
+                except Exception:
+                    pass
+
+                # أنشئ سجل الموظف
+                emp = Employee.objects.create(
+                    user=user,
+                    full_name=obj.full_name,
+                    national_id=obj.national_id,
+                    phone_number=obj.phone,
+                )
+                obj.employee = emp
+                obj.save(update_fields=["employee"])
             if obj.employee_id:
                 add_url = reverse("admin:api_guard_contract_add") + f"?employee={obj.employee.pk}"
                 self.message_user(
