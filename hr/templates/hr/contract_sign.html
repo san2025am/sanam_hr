@@ -1,0 +1,87 @@
+
+{% load static %}
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>توقيع العقد — سنام</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.rtl.min.css" rel="stylesheet">
+  <link href="{% static 'sanam/brand.css' %}" rel="stylesheet">
+  <style>
+    .sig-pad { border: 2px dashed var(--accent); border-radius: 8px; width: 100%; height: 240px; touch-action: none; background: #fff; }
+    .contract-box { background: #fff; padding: 16px; border-radius: 8px; box-shadow: var(--shadow); border:1px solid rgba(0,0,0,.04) }
+    .contract-body { white-space: pre-wrap; line-height: 1.9; }
+  </style>
+</head>
+<body class="bg-light">
+<div class="container py-4">
+  <div class="header">
+    <img src="{% static 'sanam/logo.png' %}" alt="Sanam" class="logo">
+    <div class="title">
+      <span class="main">سنام الأمن</span>
+      <span class="sub">قراءة وتوقيع العقد</span>
+    </div>
+  </div>
+
+  <div class="banner">يرجى قراءة العقد بعناية ثم التوقيع أدناه.</div>
+
+  <div class="contract-box mb-3">
+    <h2 class="h6" style="color:var(--brand)">عنوان العقد: {{ contract.title }}</h2>
+    <div class="contract-body">{{ contract.body|linebreaks }}</div>
+  </div>
+
+  <div class="card card-brand shadow-sm">
+    <div class="card-body">
+      <p class="mb-2">🖊 الرجاء التوقيع داخل الإطار أدناه (يمكنك التوقيع باللمس أو الماوس):</p>
+      <canvas id="sig" class="sig-pad"></canvas>
+      <div class="mt-2 d-flex gap-2">
+        <button id="clearBtn" class="btn btn-ghost">مسح</button>
+        <button id="submitBtn" class="btn btn-brand">توقيع وإرسال</button>
+      </div>
+      <div id="msg" class="mt-3"></div>
+    </div>
+  </div>
+</div>
+
+
+<script>
+(function(){
+  const canvas = document.getElementById('sig');
+  const ctx = canvas.getContext('2d');
+  let drawing=false,lastX=0,lastY=0;
+  function resize(){ const dpr=window.devicePixelRatio||1; const r=canvas.getBoundingClientRect();
+    canvas.width=Math.floor(r.width*dpr); canvas.height=Math.floor(r.height*dpr);
+    ctx.scale(dpr,dpr); ctx.lineWidth=2; ctx.lineCap='round'; ctx.lineJoin='round'; ctx.strokeStyle='#000'; }
+  window.addEventListener('resize', resize); resize();
+  function pos(e){ const r=canvas.getBoundingClientRect(); if(e.touches&&e.touches.length){
+      const t=e.touches[0]; return {x:t.clientX-r.left,y:t.clientY-r.top}; } return {x:e.clientX-r.left,y:e.clientY-r.top}; }
+  function start(e){ e.preventDefault(); drawing=true; const p=pos(e); lastX=p.x; lastY=p.y; }
+  function move(e){ if(!drawing) return; const p=pos(e); ctx.beginPath(); ctx.moveTo(lastX,lastY); ctx.lineTo(p.x,p.y); ctx.stroke(); lastX=p.x; lastY=p.y; }
+  function end(){ drawing=false; }
+  canvas.addEventListener('mousedown', start); canvas.addEventListener('mousemove', move); window.addEventListener('mouseup', end);
+  canvas.addEventListener('touchstart', start, {passive:false}); canvas.addEventListener('touchmove', move, {passive:false}); canvas.addEventListener('touchend', end);
+
+  document.getElementById('clearBtn').onclick=()=>ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  document.getElementById('submitBtn').onclick = async ()=>{
+    const dataUrl = canvas.toDataURL('image/png');
+    const form = new FormData();
+    form.append('signature_data', dataUrl);
+    {% if is_public and public_token %}
+      const url = "{% url 'contract_sign_public_submit' contract.pk public_token %}";
+    {% else %}
+      const url = "{% url 'contract_sign_submit' contract.pk %}";
+      form.append('csrfmiddlewaretoken', '{{ csrf_token }}');
+    {% endif %}
+    const res = await fetch(url, { method:'POST', body: form });
+    const j = await res.json();
+    const msg = document.getElementById('msg');
+    if (j.ok) msg.innerHTML = `<div class="alert alert-success">تم التوقيع بنجاح. <a href="${j.pdf_url}" target="_blank">فتح PDF الموقّع</a></div>`;
+    else msg.innerHTML = `<div class="alert alert-danger">فشل: ${j.detail || 'الرابط غير صالح/منتهي أو توقيع غير صحيح.'}</div>`;
+  };
+})();
+</script>
+
+</body>
+</html>

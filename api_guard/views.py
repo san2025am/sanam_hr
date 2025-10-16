@@ -40,8 +40,8 @@ from api_guard.utils.maps import (
 
 from .models import (
     AttendanceRecord,
-    Employee,
     Location,
+    Employee,
     Salary,
     Task,
     Report,
@@ -79,7 +79,7 @@ from .serializers import (
     GuardTaskUpdateSerializer,
 )
 
-from .emailer import (
+from core.emailer import (
     send_email_otp,
     notify_geofence_violation,
     notify_report_created_for_supervisor,

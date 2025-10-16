@@ -131,7 +131,7 @@ class UsernameForgotSerializer(serializers.Serializer):
         subject = "رمز استعادة كلمة المرور - سنام الأمن"
         body = f"رمز استعادة كلمة المرور الخاص بك هو: {code}\nصالح لمدة 10 دقائق.\n"
         try:
-            from .emailer import send_email_otp
+            from core.emailer import send_email_otp
             send_email_otp(user.email, subject, body)
         except Exception:
             from django.conf import settings
@@ -1027,26 +1027,67 @@ class AttendanceCheckSerializer(serializers.Serializer):
         """
         now_local = validated_data.get("now_local") or dj_timezone.localtime(dj_timezone.now())
         action = validated_data["action"]
+        employee = validated_data["employee"]
+        location = validated_data["location_obj"]
 
+        # ملاحظات تدقيقية موحدة
+        base_notes = (
+            f"{action} lat={validated_data['lat']}, lng={validated_data['lng']}, "
+            f"acc={validated_data.get('accuracy')}, "
+            f"dist={round(validated_data.get('distance_m') or 0.0, 2)}"
+        )
+
+        # عند الانصراف يجب إغلاق السجل المفتوح بدلاً من إنشاء سجل جديد
+        if action in ["check_out", "early_check_out"]:
+            open_rec = (AttendanceRecord.objects
+                        .filter(employee=employee, check_out_time__isnull=True)
+                        .order_by("-check_in_time")
+                        .first())
+            if open_rec:
+                open_rec.check_out_time = now_local
+                open_rec.check_type = action
+                open_rec.early_checkout = (action == "early_check_out")
+                # حدّث معلومات الموقع/التتبّع الأخيرة
+                open_rec.location = location or open_rec.location
+                open_rec.shift = validated_data.get("current_shift") or open_rec.shift
+                open_rec.biometric_verified = validated_data.get("biometric_verified", False)
+                open_rec.biometric_method = validated_data.get("biometric_method", "")
+                open_rec.biometric_attempts = validated_data.get("biometric_attempts", 0)
+                open_rec.is_violation = bool(validated_data.get("violation", False))
+                # أضف الملاحظات بدل استبدالها
+                note = (open_rec.notes or "").strip()
+                open_rec.notes = (note + (" | " if note else "") + base_notes).strip()
+                # حقول الأمان/الموقع
+                open_rec.lat = validated_data.get("lat")
+                open_rec.lng = validated_data.get("lng")
+                open_rec.accuracy = validated_data.get("accuracy")
+                open_rec.location_age_ms = validated_data.get("location_age_ms")
+                open_rec.provider = validated_data.get("provider")
+                open_rec.is_mock = bool(validated_data.get("is_mock", False))
+                open_rec.integrity_verdict = validated_data.get("integrity_verdict")
+                # احفظ التحديث
+                open_rec.save()
+                return open_rec
+
+        # الحالة الافتراضية: إنشاء سجل جديد (الحضور أو غياب سجل مفتوح عند الانصراف)
         kwargs = {
-            "employee": validated_data["employee"],
-            "location": validated_data["location_obj"],
+            "employee": employee,
+            "location": location,
             "shift": validated_data.get("current_shift"),
             "biometric_verified": validated_data.get("biometric_verified", False),
             "biometric_method": validated_data.get("biometric_method", ""),
             "biometric_attempts": validated_data.get("biometric_attempts", 0),
-            "is_violation": validated_data.get("violation", False),
-            "notes": (
-                f"{action} lat={validated_data['lat']}, lng={validated_data['lng']}, "
-                f"acc={validated_data.get('accuracy')}, "
-                f"dist={round(validated_data.get('distance_m') or 0.0, 2)}"
-            )
+            "is_violation": bool(validated_data.get("violation", False)),
+            "notes": base_notes,
+            "check_type": action,
         }
-
         if action == "check_in":
             kwargs["check_in_time"] = now_local
         elif action in ["check_out", "early_check_out"]:
+            # في حال عدم وجود سجل مفتوح لسبب ما، سجّل وقت الانصراف فقط كتدقيق
+            kwargs["check_in_time"] = now_local  # لتفادي null، يمكن تعديله بسياسات لاحقة
             kwargs["check_out_time"] = now_local
+            kwargs["early_checkout"] = (action == "early_check_out")
         else:
             raise ValueError(f"Unknown action: {action}")
 

@@ -1,0 +1,120 @@
+{% load static %}
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>التقديم على وظيفة — سنام</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.rtl.min.css" rel="stylesheet">
+  <link href="{% static 'sanam/brand.css' %}" rel="stylesheet">
+  <style>
+    .req:after{content:" *"; color:var(--danger); font-weight:700}
+    .form-text.hint{color:var(--ink-muted); font-size:.9rem}
+  </style>
+</head>
+<body class="bg-light">
+<div class="container py-4">
+  <!-- هيدر الهوية -->
+  <div class="header">
+    <img src="{% static 'sanam/logo.png' %}" alt="Sanam" class="logo">
+    <div class="title">
+      <span class="main">سنام الأمن</span>
+      <span class="sub">بوابة التوظيف</span>
+    </div>
+  </div>
+
+  <h1 class="h4 mb-3">📝 التقديم على وظيفة</h1>
+
+  {% if messages %}
+    {% for m in messages %}
+      <div class="alert alert-{{ m.tags }} mb-3">{{ m }}</div>
+    {% endfor %}
+  {% endif %}
+
+  <div class="card card-brand shadow-sm">
+    <div class="card-body">
+      <form method="post" enctype="multipart/form-data" class="row g-3 needs-validation" novalidate>
+        {% csrf_token %}
+
+        <div class="col-md-6">
+          <label class="form-label req" for="{{ form.full_name.id_for_label }}">{{ form.full_name.label }}</label>
+          {{ form.full_name }}
+          <div class="invalid-feedback">الرجاء إدخال الاسم الرباعي.</div>
+        </div>
+
+        <div class="col-md-6">
+          <label class="form-label req" for="{{ form.national_id.id_for_label }}">{{ form.national_id.label }}</label>
+          {{ form.national_id }}
+          <div class="form-text hint">10 أرقام.</div>
+          <div class="invalid-feedback">رقم الهوية يجب أن يكون 10 أرقام.</div>
+        </div>
+
+        <div class="col-md-6">
+          <label class="form-label req" for="{{ form.phone.id_for_label }}">{{ form.phone.label }}</label>
+          {{ form.phone }}
+          <div class="form-text hint">الصيغة: 05xxxxxxxx</div>
+          <div class="invalid-feedback">رقم الجوال يجب أن يبدأ بـ 05 ويتكون من 10 أرقام.</div>
+        </div>
+
+        <div class="col-md-6">
+          <label class="form-label" for="{{ form.email.id_for_label }}">{{ form.email.label }}</label>
+          {{ form.email }}
+        </div>
+
+        <div class="col-md-6">
+          <label class="form-label req" for="{{ form.position.id_for_label }}">{{ form.position.label }}</label>
+          {{ form.position }}
+          <div class="invalid-feedback">اختر الوظيفة المتقدم لها.</div>
+        </div>
+
+        <div class="col-md-6">
+          <label class="form-label" for="{{ form.resume.id_for_label }}">{{ form.resume.label }}</label>
+          {{ form.resume }}
+          <div class="form-text hint">PDF أو صورة.</div>
+        </div>
+
+        <div class="col-md-6">
+          <label class="form-label" for="{{ form.qualification_document.id_for_label }}">{{ form.qualification_document.label }}</label>
+          {{ form.qualification_document }}
+          <div class="form-text hint">PDF أو صورة.</div>
+        </div>
+
+        <div class="col-md-6">
+          <label class="form-label" for="{{ form.cover_letter.id_for_label }}">{{ form.cover_letter.label }}</label>
+          {{ form.cover_letter }}
+        </div>
+
+        <div class="col-12">
+          <label class="form-label" for="{{ form.other_qualifications.id_for_label }}">{{ form.other_qualifications.label }}</label>
+          {{ form.other_qualifications }}
+          <div class="form-text hint">يمكن اختيار عدة ملفات مرّة واحدة (PDF/صور).</div>
+        </div>
+
+        {% if form.errors %}
+          <div class="col-12">
+            <div class="alert alert-danger">تحقق من الحقول باللون الأحمر وأعد المحاولة.</div>
+          </div>
+        {% endif %}
+
+        <div class="col-12">
+          <button class="btn btn-brand">إرسال الطلب</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  'use strict';
+  const forms = document.querySelectorAll('.needs-validation');
+  Array.from(forms).forEach(form => {
+    form.addEventListener('submit', event => {
+      if (!form.checkValidity()) { event.preventDefault(); event.stopPropagation(); }
+      form.classList.add('was-validated');
+    }, false);
+  });
+})();
+</script>
+</body>
+</html>

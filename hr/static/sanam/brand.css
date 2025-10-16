@@ -1,0 +1,27 @@
+
+:root{
+  --brand:  #4d2c12;
+  --accent: #6b4f45;
+  --paper:  #ffffff;
+  --bg:     #f6f3f0;
+  --ink:    #1f1f1f;
+  --ink-muted:#6f6f6f;
+  --success:#2e7d32;
+  --danger: #c62828;
+  --warning:#f9a825;
+  --radius: 12px;
+  --shadow: 0 8px 24px rgba(0,0,0,.06);
+}
+body{ background:var(--bg); color:var(--ink); font-family:'Tajawal', Arial, sans-serif; }
+.header{display:flex;align-items:center;gap:12px;padding:12px 0;margin-bottom:12px}
+.header .logo{height:42px;width:auto}
+.header .title{display:flex;flex-direction:column}
+.header .title .main{font-weight:800;font-size:clamp(18px,2.6vw,28px);color:var(--brand)}
+.header .title .sub{font-weight:600;font-size:clamp(12px,1.6vw,14px);color:var(--ink-muted)}
+.card-brand{background:var(--paper);border-radius:var(--radius);box-shadow:var(--shadow);border:1px solid rgba(0,0,0,.04)}
+.btn-brand{background:var(--accent);border:none;color:#fff;border-radius:10px;padding:10px 16px;font-weight:700}
+.btn-brand:hover{filter:brightness(.96)}
+.btn-ghost{background:transparent;border:1px solid var(--accent);color:var(--accent);border-radius:10px;padding:10px 16px;font-weight:700}
+.form-control, .form-select{border-radius:10px;border:1px solid #ddd}
+.form-label{font-weight:700;color:var(--ink)}
+.banner{background:linear-gradient(90deg,var(--brand),var(--accent));color:#fff;padding:10px 14px;border-radius:10px;margin-bottom:10px}

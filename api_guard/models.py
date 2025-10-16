@@ -3,6 +3,9 @@
 from datetime import datetime, date, timedelta
 from typing import Optional
 from decimal import Decimal, ROUND_HALF_UP
+import secrets
+from django.core.validators import FileExtensionValidator
+from django.utils.translation import gettext_lazy as _
 
 from django.db import models, transaction
 from django.contrib.auth.models import AbstractUser
@@ -100,6 +103,27 @@ class Employee(BaseModel):
     profile_photo = models.ImageField(upload_to='employee_photos/', null=True, blank=True, verbose_name="صورة الموظف")
     # رقم داخلي فريد من 8 خانات يبدأ بـ 8
     badge_code = models.CharField(max_length=8, unique=True, null=True, blank=True, verbose_name="رقم الموظف (8 خانات)")
+    class EducationLevel(models.TextChoices):
+            NONE = "none", _("بدون")
+            HIGH_SCHOOL = "high_school", _("ثانوي")
+            DIPLOMA = "diploma", _("دبلوم")
+            BACHELOR = "bachelor", _("بكالوريوس")
+            MASTER = "master", _("ماجستير")
+            DOCTORATE = "phd", _("دكتوراه")
+
+    education_level = models.CharField(
+        max_length=20,
+        choices=EducationLevel.choices,
+        default=EducationLevel.NONE,
+        verbose_name="المؤهل العلمي"
+    )
+    major = models.CharField(max_length=200, verbose_name="التخصص", blank=True)
+    qualification_document = models.FileField(
+        upload_to="qualifications/",
+        verbose_name="ملف المؤهل العلمي (PDF/صور)",
+        blank=True,
+        null=True
+    )
 
     # العمل
     hire_date = models.DateField(null=True, blank=True, verbose_name="تاريخ التعيين")
@@ -146,6 +170,14 @@ class Employee(BaseModel):
         verbose_name = "3. موظف"
         verbose_name_plural = "3. الموظفون"
 
+class AdditionalQualification(models.Model):
+    employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name="extra_quals", verbose_name="الموظف")
+    title = models.CharField(max_length=200, verbose_name="اسم المؤهل/الشهادة")
+    file = models.FileField(upload_to="qualifications/extra/", verbose_name="الملف")
+    issued_at = models.DateField(verbose_name="تاريخ الإصدار", blank=True, null=True)
+
+    def __str__(self):
+        return f"{self.title} ({self.employee.full_name})"
 
 def _generate_badge_code() -> str:
     import random
@@ -976,13 +1008,42 @@ class EmployeeViolation(BaseModel):
 # 6) العقود والمالية واللوجستيات
 # ===================================================================
 
-class Contract(BaseModel):
-    employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name='contracts', verbose_name="الموظف")
-    contract_file = models.FileField(upload_to='contracts/', verbose_name="ملف العقد")
-    start_date = models.DateField(verbose_name="تاريخ بدء العقد")
-    end_date = models.DateField(null=True, blank=True, verbose_name="تاريخ انتهاء العقد")
-    is_signed = models.BooleanField(default=False, verbose_name="هل تم توقيعه؟")
-    signed_at = models.DateTimeField(null=True, blank=True, verbose_name="وقت التوقيع")
+
+
+
+class Contract(models.Model):
+    employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name="contracts", verbose_name="الموظف")
+    title = models.CharField(max_length=200, verbose_name="عنوان العقد", default="عقد عمل")
+    contract_type = models.CharField(max_length=100, verbose_name="نوع العقد", blank=True)
+    start_date = models.DateField(verbose_name="تاريخ البداية")
+    end_date = models.DateField(verbose_name="تاريخ النهاية", blank=True, null=True)
+    salary = models.DecimalField(max_digits=10, decimal_places=2, verbose_name="الراتب")
+    file = models.FileField(upload_to="contracts/", verbose_name="ملف العقد (PDF)", blank=True, null=True)
+
+    # توقيع إلكتروني
+    body = models.TextField(verbose_name="نص العقد", blank=True)
+    signature_image = models.ImageField(upload_to="contracts/signatures/", verbose_name="صورة توقيع الموظف", blank=True, null=True)
+    signed_pdf = models.FileField(upload_to="contracts/signed/", verbose_name="نسخة PDF موقعة", blank=True, null=True,
+                                  validators=[FileExtensionValidator(["pdf"])])
+    signed_at = models.DateTimeField(verbose_name="وقت التوقيع", blank=True, null=True)
+
+    signed_by_employee = models.BooleanField(default=False, verbose_name="توقيع الموظف")
+    signed_by_company = models.BooleanField(default=False, verbose_name="توقيع الشركة")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="أُنشئ في")
+    sign_token = models.CharField(max_length=64, blank=True, null=True, unique=True, verbose_name="رمز توقيع عام")
+    sign_token_expires_at = models.DateTimeField(blank=True, null=True, verbose_name="صلاحية رابط التوقيع")
+
+    def generate_sign_link(self, hours_valid: int = 72) -> str:
+        """ينشئ/يجدد رمز توقيع صالح لعدد ساعات محددة."""
+        self.sign_token = secrets.token_urlsafe(32)
+        self.sign_token_expires_at = timezone.now() + timezone.timedelta(hours=hours_valid)
+        self.save(update_fields=["sign_token", "sign_token_expires_at"])
+        return self.sign_token  # أعده لتبني به الرابط في لوحة الإدارة
+    def mark_signed(self):
+        self.signed_by_employee = True
+        if not self.signed_at:
+            self.signed_at = timezone.now()
+        self.save(update_fields=["signed_by_employee", "signed_at"])
 
     def __str__(self): return f"عقد الموظف {self.employee.full_name}"
 

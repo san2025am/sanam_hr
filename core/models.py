@@ -12,9 +12,6 @@ class TimeStampedModel(models.Model):
 
 
 class UUIDPrimaryKeyModel(models.Model):
-    """
-    يضبط pk إلى UUID بدل AutoField.
-    """
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
 
     class Meta:
@@ -35,13 +32,9 @@ class SoftDeleteQuerySet(models.QuerySet):
 
 
 class SoftDeleteManager(models.Manager):
-    """
-    المدير الافتراضي يستثني المحذوف منطقيًا.
-    """
     def get_queryset(self):
         return SoftDeleteQuerySet(self.model, using=self._db).alive()
 
-    # للوصول لجميع السجلات بما فيها المحذوفة:
     def all_with_deleted(self):
         return SoftDeleteQuerySet(self.model, using=self._db).all()
 
@@ -52,9 +45,7 @@ class SoftDeleteManager(models.Manager):
 class SoftDeleteModel(models.Model):
     deleted_at = models.DateTimeField(null=True, blank=True, editable=False)
 
-    # المدير الافتراضي
     objects = SoftDeleteManager()
-    # مدير خام للوصول الكامل عند الحاجة
     all_objects = SoftDeleteQuerySet.as_manager()
 
     class Meta:
@@ -65,10 +56,6 @@ class SoftDeleteModel(models.Model):
         return self.deleted_at is not None
 
     def delete(self, using=None, keep_parents=False, hard: bool = False):
-        """
-        delete() الافتراضي = حذف منطقي.
-        delete(hard=True) = حذف نهائي من قاعدة البيانات.
-        """
         if hard:
             return super().delete(using=using, keep_parents=keep_parents)
         self.deleted_at = timezone.now()
@@ -81,8 +68,10 @@ class SoftDeleteModel(models.Model):
 
 
 class BaseModel(UUIDPrimaryKeyModel, TimeStampedModel, SoftDeleteModel):
-    """
-    ارث منه في بقية الموديلات لتوحيد السلوك والحقول.
-    """
     class Meta:
         abstract = True
+
+
+"""
+Unified import layer via proxies. Do NOT define new DB tables here.
+"""

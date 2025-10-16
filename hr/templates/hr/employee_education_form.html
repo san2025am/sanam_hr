@@ -1,0 +1,70 @@
+
+{% load static %}
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>بيانات المؤهل العلمي</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.rtl.min.css" rel="stylesheet">
+  <link href="{% static 'sanam/brand.css' %}" rel="stylesheet">
+</head>
+<body class="bg-light">
+<div class="container py-4">
+  <div class="header">
+    <img src="{% static 'sanam/logo.png' %}" alt="Sanam" class="logo">
+    <div class="title">
+      <span class="main">سنام الأمن</span>
+      <span class="sub">تعديل بيانات المؤهل — {{ employee.full_name }}</span>
+    </div>
+  </div>
+  <div class="card card-brand shadow-sm"><div class="card-body">
+    <form method="post" enctype="multipart/form-data" class="row g-3">
+      {% csrf_token %}
+      <div class="col-md-4">{{ form.education_level.label_tag }}{{ form.education_level }}</div>
+      <div class="col-md-8">{{ form.major.label_tag }}{{ form.major }}</div>
+      <div class="col-12">{{ form.qualification_document.label_tag }}{{ form.qualification_document }}</div>
+
+      <hr>
+      <h2 class="h6">مؤهلات/شهادات إضافية</h2>
+      <div id="extra-wrap">
+        <div class="row g-2 align-items-end mb-2">
+          <div class="col-md-5"><label class="form-label">عنوان المؤهل</label><input name="extra_titles" class="form-control" placeholder="مثال: دورة أمنية" /></div>
+          <div class="col-md-3"><label class="form-label">تاريخ الإصدار</label><input type="date" name="extra_dates" class="form-control" /></div>
+          <div class="col-md-4"><label class="form-label">الملف</label><input type="file" name="extra_files" class="form-control" /></div>
+        </div>
+      </div>
+      <button type="button" class="btn btn-ghost" onclick="addRow()">إضافة صف إضافي</button>
+
+      <div class="col-12"><button class="btn btn-brand">حفظ</button></div>
+    </form>
+
+    <hr>
+    <h2 class="h6">المؤهلات المسجلة</h2>
+    <ul class="list-group">
+      {% for q in extras %}
+        <li class="list-group-item d-flex justify-content-between align-items-center">
+          <span>{{ q.title }} {% if q.issued_at %}— <small class="text-muted">{{ q.issued_at }}</small>{% endif %}</span>
+          {% if q.file %}<a href="{{ q.file.url }}" target="_blank" class="btn btn-sm btn-outline-primary">عرض</a>{% endif %}
+        </li>
+      {% empty %}
+        <li class="list-group-item">لا توجد مؤهلات إضافية.</li>
+      {% endfor %}
+    </ul>
+  </div></div>
+</div>
+<script>
+function addRow(){
+  const wrap = document.getElementById('extra-wrap');
+  const row = document.createElement('div');
+  row.className = 'row g-2 align-items-end mb-2';
+  row.innerHTML = `
+    <div class="col-md-5"><input name="extra_titles" class="form-control" placeholder="عنوان المؤهل"/></div>
+    <div class="col-md-3"><input type="date" name="extra_dates" class="form-control"/></div>
+    <div class="col-md-4"><input type="file" name="extra_files" class="form-control"/></div>
+  `;
+  wrap.appendChild(row);
+}
+</script>
+</body>
+</html>

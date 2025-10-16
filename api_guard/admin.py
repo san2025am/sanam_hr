@@ -1,6 +1,7 @@
 # api_guard/admin.py
 
 from django.contrib import admin
+
 try:
     from import_export.admin import ImportExportModelAdmin
 except Exception:  # fallback if not installed yet
@@ -36,7 +37,24 @@ from django.core.exceptions import ValidationError
 # Inlines
 # =========================
 
+from django import forms
+from django.utils.html import format_html
+from django.urls import reverse
 
+from .models import Employee, Contract, AdditionalQualification
+from hr.utils.contracts import (
+    build_public_sign_url,
+    send_contract_email,
+)
+
+from django.contrib import admin, messages
+from django.shortcuts import redirect, get_object_or_404
+from django.urls import reverse, path
+
+# =========== Employee ===========
+class AdditionalQualificationInline(admin.TabularInline):
+    model = AdditionalQualification
+    extra = 0
 
 class EmployeeInline(admin.StackedInline):
     model = Employee
@@ -163,7 +181,7 @@ class EmployeeAdmin(ImportExportModelAdmin):
     if EmployeeResource:
         resource_classes = [EmployeeResource]
     list_display = (
-        'photo_thumb', 'full_name', 'badge_code', 'national_id', 'phone_number', 'bank_name',
+        'photo_thumb', 'full_name', 'badge_code', 'national_id', "education_level", "major",'phone_number', 'bank_name',
         'monthly_leave_quota_hours', 'supervisor'
     )
     search_fields = ('full_name', 'national_id', 'phone_number', 'bank_account')
@@ -191,6 +209,8 @@ class EmployeeAdmin(ImportExportModelAdmin):
         ('الإجازات', {'fields': ('monthly_leave_quota_hours',)}),
         ('تعليمات', {'fields': ('instructions',)}),
     )
+
+    inlines = [AdditionalQualificationInline]
 
     def photo_thumb(self, obj):
         try:
@@ -507,12 +527,70 @@ class EmployeeViolationAdmin(admin.ModelAdmin):
 # Contracts / Finance / Logistics
 # =========================
 
+
 @admin.register(Contract)
 class ContractAdmin(admin.ModelAdmin):
-    list_display = ('employee', 'start_date', 'end_date', 'is_signed')
-    list_filter = ('is_signed',)
-    search_fields = ('employee__full_name',)
-    autocomplete_fields = ('employee',)
+    list_display = ("employee", "title", "start_date", "end_date", "salary",
+                    "signed_by_employee", "signed_by_company", "sign_link")
+    readonly_fields = ("quick_tools",)  # حقل أزرار سريع للعرض فقط
+    fields = ("employee", "title", "contract_type", "start_date", "end_date", "salary",
+              "file", "body", "signed_by_employee", "signed_by_company",
+              "quick_tools")  # ضفّه آخر النموذج
+
+    def get_urls(self):
+        urls = super().get_urls()
+        my = [
+            path("<int:pk>/gen-token/", self.admin_site.admin_view(self.gen_token_view), name="hr_contract_gen_token"),
+            path("<int:pk>/send-link/", self.admin_site.admin_view(self.send_link_view), name="hr_contract_send_link"),
+        ]
+        return my + urls
+
+    def quick_tools(self, obj):
+        # عند الإضافة لأول مرة أو قبل حفظ الكائن لا يوجد pk ⇒ لا روابط أدوات
+        if not obj or not getattr(obj, 'pk', None):
+            return "—"
+        gen_url = reverse("admin:hr_contract_gen_token", args=[obj.pk])
+        send_url = reverse("admin:hr_contract_send_link", args=[obj.pk])
+        return format_html(
+            '<a class="button" href="{}">🔗 توليد/تجديد رابط التوقيع (72س)</a>&nbsp;'
+            '<a class="button" href="{}">✉️ إرسال الرابط إلى البريد</a>',
+            gen_url, send_url
+        )
+    quick_tools.short_description = "أدوات سريعة"
+
+    def sign_link(self, obj):
+        if getattr(obj, "sign_token", None) and getattr(obj, "sign_token_expires_at", None):
+            url = reverse("contract_sign_public", args=[obj.pk, obj.sign_token])
+            return format_html('<a href="{}" target="_blank">فتح رابط التوقيع</a>', url)
+        return "—"
+    sign_link.short_description = "رابط التوقيع"
+
+    def gen_token_view(self, request, pk):
+        c = get_object_or_404(Contract, pk=pk)
+        c.generate_sign_link(hours_valid=72)
+        messages.success(request, "تم توليد/تحديث رابط التوقيع (72 ساعة).")
+        return redirect(reverse("admin:api_guard_contract_change", args=[pk]))
+
+    def send_link_view(self, request, pk):
+        c = get_object_or_404(Contract, pk=pk)
+        # تأكد من وجود توكن صالح، وإن لم يوجد أنشئه
+        if not c.sign_token or not c.sign_token_expires_at:
+            c.generate_sign_link(hours_valid=72)
+        # ابحث عن بريد الموظف من user.email إن لم يوجد حقل email على Employee
+        emp_email = None
+        try:
+            emp_email = getattr(getattr(c.employee, 'user', None), 'email', None)
+        except Exception:
+            emp_email = None
+        if not emp_email:
+            messages.error(request, "لا يمكن الإرسال: لا يوجد بريد مرتبط بالموظف.")
+            return redirect(reverse("admin:api_guard_contract_change", args=[pk]))
+        link = build_public_sign_url(c)
+        send_contract_email(emp_email, getattr(c.employee, 'full_name', ''), link)
+        messages.success(request, f"تم إرسال رابط التوقيع إلى: {emp_email}")
+        return redirect(reverse("admin:api_guard_contract_change", args=[pk]))
+# =========== JobApplication ===========
+\
 
 @admin.register(Advance)
 class AdvanceAdmin(admin.ModelAdmin):

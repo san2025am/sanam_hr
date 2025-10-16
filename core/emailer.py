@@ -1,4 +1,4 @@
-# api_guard/emailer.py
+# core/emailer.py
 import logging
 
 from django.conf import settings
@@ -171,7 +171,7 @@ def notify_report_created_for_supervisor(*, report, employee) -> None:
         f"تم إنشاء بلاغ نوع: {report.get_report_type_display()} من الحارس: {employee.full_name}.",
         f"الحالة: {report.get_status_display()}.",
     ]
-    if loc_name:
+    if (loc_name):
         lines.append(f"الموقع: {loc_name}.")
     if url:
         lines.append(f"رابط الإدارة: {url}")
@@ -235,3 +235,4 @@ def notify_report_escalated_to_exec(*, report) -> None:
         email.send(fail_silently=False)
     except Exception as exc:
         logger.warning("Failed sending report exec escalation email to %s: %s", recips, exc)
+
