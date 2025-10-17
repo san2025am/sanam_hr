@@ -133,6 +133,8 @@ INSTALLED_APPS = [
 ]
 AUTH_USER_MODEL = 'api_guard.User'
 INSTALLED_APPS += ['hr']
+INSTALLED_APPS += ['policies']
+INSTALLED_APPS += ['payroll']
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',

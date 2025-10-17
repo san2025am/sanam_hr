@@ -51,3 +51,23 @@ urlpatterns = [
 # Serve media files in development
 if settings.DEBUG:
     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+
+# Optional: OpenAPI/Swagger schema if drf-spectacular is installed; fallback to core schema
+try:
+    from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
+
+    urlpatterns += [
+        path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
+        path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),
+    ]
+except Exception:
+    try:
+        from rest_framework.schemas import get_schema_view
+        from django.views.generic import TemplateView
+
+        schema_view = get_schema_view(title="Sanam API", description="API schema", version="1.0.0")
+        urlpatterns += [
+            path('api/schema/', schema_view, name='schema'),
+        ]
+    except Exception:
+        pass

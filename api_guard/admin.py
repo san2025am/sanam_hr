@@ -456,6 +456,40 @@ class SalaryAdmin(admin.ModelAdmin):
     readonly_fields = ('total_salary',)
     autocomplete_fields = ('employee',)
 
+    def save_model(self, request, obj, form, change):
+        """
+        امنع خطأ UNIQUE عند محاولة إضافة Salary لموظف لديه سجل سابق (حتى لو محذوف منطقيًا):
+        - في حالة الإضافة (change=False): ابحث عن أي سجل Salary (حتى ضمن المحذوف منطقيًا) لنفس الموظف.
+        - إن وُجد، حدّثه وأعد تفعيله بدل إنشاء صف جديد ليتوافق مع قيد الـ OneToOne على مستوى قاعدة البيانات.
+        - بهذه الطريقة نتجنّب IntegrityError: UNIQUE constraint failed: api_guard_salary.employee_id
+        """
+        try:
+            if not change and getattr(obj, 'employee_id', None):
+                from django.contrib import messages
+                from .models import Salary as SalaryModel
+                all_qs = getattr(SalaryModel, 'all_objects', SalaryModel.objects)
+                existing = (all_qs.filter(employee_id=obj.employee_id)
+                                   .order_by('-updated_at')
+                                   .first())
+                if existing:
+                    fields = ['base_salary', 'bonuses', 'deductions', 'overtime', 'pay_date']
+                    for f in fields:
+                        try:
+                            setattr(existing, f, getattr(obj, f))
+                        except Exception:
+                            pass
+                    # أعد تفعيل السجل إن كان محذوفًا منطقيًا
+                    if getattr(existing, 'deleted_at', None) is not None:
+                        existing.deleted_at = None
+                        fields.append('deleted_at')
+                    existing.save(update_fields=list(set(fields + ['updated_at'])) or None)
+                    messages.success(request, 'تم تحديث/استعادة سجل الراتب القائم بدلاً من إنشاء سجل مكرر لهذا الموظف.')
+                    return
+        except Exception:
+            # fallback للسلوك الافتراضي إن حدث أي خطأ غير متوقع
+            pass
+        return super().save_model(request, obj, form, change)
+
 # =========================
 # Reports / Requests
 # =========================
@@ -539,6 +573,19 @@ class EmployeeViolationAdmin(admin.ModelAdmin):
     list_filter = ('status', 'rule', 'location', 'warning_level')
     search_fields = ('employee__full_name', 'description', 'rule__title')
     autocomplete_fields = ('employee', 'reported_by', 'rule', 'location')
+
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        try:
+            auto = getattr(settings, 'AUTO_PAYROLL_ON_CHANGE', True)
+        except Exception:
+            auto = True
+        if auto and obj.employee and getattr(obj, 'occurred_at', None):
+            try:
+                from payroll.utils import build_and_post_for_employee_on_date
+                build_and_post_for_employee_on_date(employee=obj.employee, d=obj.occurred_at.date())
+            except Exception:
+                pass
 
 # =========================
 # Contracts / Finance / Logistics

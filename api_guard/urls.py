@@ -24,6 +24,15 @@ from api_guard.views import (
     LocationPingAPIView,
     GeofenceViolationPauseAPIView,
 )
+from api_guard.api_flutter import (
+    TodayHolidayView,
+    LeaveBalanceView,
+    LeaveApplyView,
+    PayslipView,
+    RewardsListView,
+    OvertimeListView,
+    MarkItemPaidView,
+)
 
 
 # 2. تسجيل الـ ViewSet مع الـ Router
@@ -51,4 +60,12 @@ urlpatterns = [
     path("guards/profile/photo/", GuardProfilePhotoUploadView.as_view(), name="guard-profile-photo"),
     path("attendance/last/", AttendanceLastForMeView.as_view(), name="attendance_last"),
     path("attendance/exists/<uuid:pk>/", AttendanceExistsView.as_view(), name="attendance_exists"),
+    # Flutter API endpoints
+    path("holidays/today/", TodayHolidayView.as_view(), name="holidays-today"),
+    path("leaves/balance/", LeaveBalanceView.as_view(), name="leaves-balance"),
+    path("leaves/apply/", LeaveApplyView.as_view(), name="leaves-apply"),
+    path("payroll/cycle/<int:y>-<int:m>/payslip/", PayslipView.as_view(), name="payroll-payslip"),
+    path("payroll/rewards/", RewardsListView.as_view(), name="payroll-rewards"),
+    path("payroll/overtime/", OvertimeListView.as_view(), name="payroll-overtime"),
+    path("payroll/items/<uuid:pk>/mark-paid/", MarkItemPaidView.as_view(), name="payroll-item-mark-paid"),
 ]

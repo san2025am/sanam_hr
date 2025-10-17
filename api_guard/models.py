@@ -13,6 +13,7 @@ from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
 from django.db.models import F
 from django.core.exceptions import ValidationError
+from django.conf import settings
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.utils import timezone
 
@@ -778,6 +779,31 @@ class EmployeeLeaveBalance(BaseModel):
         default=0,
         verbose_name="ساعات الإجازة المستخدمة",
     )
+    # نظام الأيام (سياسات الإجازات)
+    quota_days = models.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        default=0,
+        verbose_name="أيام الإجازة المسموحة (شهريًا)",
+    )
+    used_paid_days = models.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        default=0,
+        verbose_name="أيام الإجازة المدفوعة المستخدمة",
+    )
+    used_unpaid_days = models.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        default=0,
+        verbose_name="أيام الإجازة غير المدفوعة (لأغراض الرواتب)",
+    )
+    carry_over_days = models.DecimalField(
+        max_digits=6,
+        decimal_places=2,
+        default=0,
+        verbose_name="أيام مرحّلة من السنة السابقة",
+    )
 
     class Meta:
         verbose_name = "رصيد إجازة شهري"
@@ -792,6 +818,18 @@ class EmployeeLeaveBalance(BaseModel):
     def remaining_hours(self):
         remaining = (self.quota_hours or Decimal('0')) - (self.used_hours or Decimal('0'))
         return max(Decimal('0'), remaining)
+
+    @property
+    def balance_days(self) -> Decimal:
+        """
+        الرصيد الحالي بالأيام = (quota_days + carry_over_days) - used_paid_days.
+        لا يشمل الإجازات غير المدفوعة؛ هذه تُستعمل لتقليل أيام الاستحقاق المالي (payable_days).
+        """
+        q = self.quota_days or Decimal('0')
+        c = self.carry_over_days or Decimal('0')
+        u = self.used_paid_days or Decimal('0')
+        bal = (q + c) - u
+        return bal if bal > 0 else Decimal('0')
 
 # ===================================================================
 # 4) التقارير والطلبات
@@ -1379,7 +1417,34 @@ def _quantize_hours(value: Decimal | float | int | None) -> Decimal | None:
 def _get_leave_balance(employee: Employee, dt) -> tuple[EmployeeLeaveBalance, bool]:
     if dt is None:
         raise ValidationError("تاريخ الإجازة غير معروف")
-    quota = _quantize_hours(employee.monthly_leave_quota_hours or Decimal('0'))
+    # احتساب الحصة الشهرية بالساعات بناءً على السياسة إن وُجدت، وإلا فحقل الموظف.
+    # السياسة تعمل بنظام الأيام؛ نحول إلى ساعات عبر LEAVE_HOURS_PER_DAY (افتراضي 8).
+    policy_quota_hours = None
+    try:
+        # استدعاء محلل السياسات ديناميكيًا لتفادي الدوران في الاستيراد
+        from django.apps import apps as _apps
+        from policies.utils.resolver import resolve_policy  # لا يعتمد على api_guard
+        PolicyBundle = _apps.get_model('policies', 'PolicyBundle')
+        LeavePolicy = _apps.get_model('policies', 'LeavePolicy')
+
+        # اضمن أن dt هو تاريخ
+        pol_date = dt.date() if hasattr(dt, 'date') else dt
+        bundle = resolve_policy(
+            PolicyBundle.PolicyType.LEAVE,
+            role_id=getattr(getattr(employee, 'user', None), 'role_id', None),
+            on_date=pol_date,
+        )
+        if bundle is not None:
+            pol = LeavePolicy.objects.filter(bundle=bundle).first()
+            if pol is not None:
+                hours_per_day = Decimal(str(getattr(settings, 'LEAVE_HOURS_PER_DAY', 8)))
+                policy_quota_hours = _quantize_hours(Decimal(pol.monthly_accrual_days or 0) * hours_per_day)
+    except Exception:
+        policy_quota_hours = None
+
+    quota = policy_quota_hours
+    if quota is None:
+        quota = _quantize_hours(employee.monthly_leave_quota_hours or Decimal('0'))
     defaults = {
         'quota_hours': quota or Decimal('0'),
         'used_hours': Decimal('0'),

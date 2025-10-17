@@ -94,6 +94,7 @@ from .services.attendance import (
 )
 from .sms import send_sms_twilio
 from .utils.net import client_ip as _client_ip, lookup_asn as _lookup_asn
+from policies.utils.calendar import is_day_off
 
 User = get_user_model()
 logger = logging.getLogger(__name__)
@@ -1439,6 +1440,21 @@ class AttendanceCheckAPIView(APIView):
                     extra={"should_monitor_location": monitoring_should_follow, "shift": shift_payload},
                 )
 
+            # حظر تسجيل الحضور إذا كان اليوم عطلة/راحة
+            try:
+                if is_day_off(now_local.date(), employee=employee, location=location, shift=current_shift_obj):
+                    return self._deny(
+                        action=action,
+                        detail="اليوم عطلة/راحة — لا يُسمح بتسجيل الحضور.",
+                        reason_code="DAY_OFF",
+                        start=start_dt, end=end_dt, now=now_local,
+                        monitoring=monitoring_payload,
+                        extra={"should_monitor_location": False, "shift": shift_payload},
+                    )
+            except Exception:
+                # لا تعطل الطلب إن فشل التقييم — تابع (fail-open)
+                pass
+
             rec = ser.save()
             update_fields = []
             if getattr(rec, "check_type", None) != action:
@@ -1570,30 +1586,35 @@ class AttendanceCheckAPIView(APIView):
             if (not monitoring_pause) and violation_flag and rec.check_in_time:
                 violation_outside_minutes = (now_local - rec.check_in_time).total_seconds() / 60.0
                 if violation_outside_minutes >= monitoring_grace_minutes:
-                    # تسجيل مخالفة
-                    _ded = _apply_geofence_salary_deduction(employee, GEOFENCE_DEDUCTION_PERCENT)
-                    violation_escalated = True
+                    # لا تُصعّد في يوم عطلة
                     try:
-                        notify_geofence_violation(
-                            employee=employee,
-                            location=rec.location or location,
-                            outside_minutes=violation_outside_minutes,
-                            grace_minutes=monitoring_grace_minutes,
-                            recorded_at=now_local,
-                        )
+                        is_off = is_day_off(now_local.date(), employee=employee, location=rec.location or location, shift=getattr(rec, 'shift', None))
                     except Exception:
-                        pass
-                    try:
-                        _create_geofence_violation_record(
-                            employee=employee,
-                            location=rec.location or location,
-                            deduction_value=_ded,
-                            outside_minutes=violation_outside_minutes,
-                            grace_minutes=monitoring_grace_minutes,
-                            rule=monitoring_rule,
-                        )
-                    except Exception:
-                        pass
+                        is_off = False
+                    if not is_off:
+                        _ded = _apply_geofence_salary_deduction(employee, GEOFENCE_DEDUCTION_PERCENT)
+                        violation_escalated = True
+                        try:
+                            notify_geofence_violation(
+                                employee=employee,
+                                location=rec.location or location,
+                                outside_minutes=violation_outside_minutes,
+                                grace_minutes=monitoring_grace_minutes,
+                                recorded_at=now_local,
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            _create_geofence_violation_record(
+                                employee=employee,
+                                location=rec.location or location,
+                                deduction_value=_ded,
+                                outside_minutes=violation_outside_minutes,
+                                grace_minutes=monitoring_grace_minutes,
+                                rule=monitoring_rule,
+                            )
+                        except Exception:
+                            pass
 
             LocationPing.objects.filter(employee=employee, violation_triggered=False).delete()
 
@@ -1679,29 +1700,34 @@ class AttendanceCheckAPIView(APIView):
             if (not monitoring_pause) and violation_flag and rec.check_in_time:
                 violation_outside_minutes = (now_local - rec.check_in_time).total_seconds() / 60.0
                 if violation_outside_minutes >= monitoring_grace_minutes:
-                    _ded = _apply_geofence_salary_deduction(employee, GEOFENCE_DEDUCTION_PERCENT)
-                    violation_escalated = True
                     try:
-                        notify_geofence_violation(
-                            employee=employee,
-                            location=rec.location or location,
-                            outside_minutes=violation_outside_minutes,
-                            grace_minutes=monitoring_grace_minutes,
-                            recorded_at=now_local,
-                        )
+                        is_off = is_day_off(now_local.date(), employee=employee, location=rec.location or location, shift=getattr(rec, 'shift', None))
                     except Exception:
-                        pass
-                    try:
-                        _create_geofence_violation_record(
-                            employee=employee,
-                            location=rec.location or location,
-                            deduction_value=_ded,
-                            outside_minutes=violation_outside_minutes,
-                            grace_minutes=monitoring_grace_minutes,
-                            rule=monitoring_rule,
-                        )
-                    except Exception:
-                        pass
+                        is_off = False
+                    if not is_off:
+                        _ded = _apply_geofence_salary_deduction(employee, GEOFENCE_DEDUCTION_PERCENT)
+                        violation_escalated = True
+                        try:
+                            notify_geofence_violation(
+                                employee=employee,
+                                location=rec.location or location,
+                                outside_minutes=violation_outside_minutes,
+                                grace_minutes=monitoring_grace_minutes,
+                                recorded_at=now_local,
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            _create_geofence_violation_record(
+                                employee=employee,
+                                location=rec.location or location,
+                                deduction_value=_ded,
+                                outside_minutes=violation_outside_minutes,
+                                grace_minutes=monitoring_grace_minutes,
+                                rule=monitoring_rule,
+                            )
+                        except Exception:
+                            pass
 
             LocationPing.objects.filter(employee=employee, violation_triggered=False).delete()
 
@@ -2112,32 +2138,37 @@ class LocationPingAPIView(APIView):
                     recorded_at__gte=outside_start,
                 ).exists()
                 if not existing_violation:
-                    # تصعيد وخصم إن لزم
-                    _ded = _apply_geofence_salary_deduction(employee, GEOFENCE_DEDUCTION_PERCENT)
-                    ping.violation_triggered = True
-                    ping.save(update_fields=["violation_triggered"])
-                    violation_triggered = True
+                    # تصعيد وخصم إن لزم — مع استثناء يوم العطلة
                     try:
-                        notify_geofence_violation(
-                            employee=employee,
-                            location=loc,
-                            outside_minutes=outside_minutes,
-                            grace_minutes=monitoring_grace_minutes,
-                            recorded_at=recorded_at,
-                        )
+                        is_off = is_day_off(recorded_at.date(), employee=employee, location=loc, shift=shift_obj)
                     except Exception:
-                        pass
-                    try:
-                        _create_geofence_violation_record(
-                            employee=employee,
-                            location=loc,
-                            deduction_value=_ded,
-                            outside_minutes=outside_minutes,
-                            grace_minutes=monitoring_grace_minutes,
-                            rule=monitoring_rule,
-                        )
-                    except Exception:
-                        pass
+                        is_off = False
+                    if not is_off:
+                        _ded = _apply_geofence_salary_deduction(employee, GEOFENCE_DEDUCTION_PERCENT)
+                        ping.violation_triggered = True
+                        ping.save(update_fields=["violation_triggered"])
+                        violation_triggered = True
+                        try:
+                            notify_geofence_violation(
+                                employee=employee,
+                                location=loc,
+                                outside_minutes=outside_minutes,
+                                grace_minutes=monitoring_grace_minutes,
+                                recorded_at=recorded_at,
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            _create_geofence_violation_record(
+                                employee=employee,
+                                location=loc,
+                                deduction_value=_ded,
+                                outside_minutes=outside_minutes,
+                                grace_minutes=monitoring_grace_minutes,
+                                rule=monitoring_rule,
+                            )
+                        except Exception:
+                            pass
 
                     # بعد تسجيل واقعة انسحاب: فحص التصعيد إلى غياب وفق حد الضبط
                     try:

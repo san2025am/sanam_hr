@@ -21,6 +21,7 @@ from ..models import (
     ViolationRule,
 )
 from ..sms import send_sms_twilio
+from policies.utils.calendar import is_day_off
 
 logger = logging.getLogger(__name__)
 
@@ -168,6 +169,13 @@ def flag_absent_employees(
             if has_attendance:
                 continue
 
+            # تخطى إنشاء مخالفة/خصم إن كان اليوم عطلة
+            try:
+                if is_day_off(attendance_date, employee=employee, location=assignment.location, shift=shift):
+                    continue
+            except Exception:
+                pass
+
             with transaction.atomic():
                 deduction = _apply_salary_deduction(employee)
                 violation = _create_absence_violation(
@@ -232,13 +240,24 @@ def _handle_single_record(record: AttendanceRecord, *, as_of: datetime, notify: 
 
     absence_date = timezone.localtime(expected_end).date()
 
-    with transaction.atomic():
-        deduction = _apply_salary_deduction(record.employee)
-        violation = _create_violation(record, absence_date, deduction)
+    # في يوم عطلة: لا تُنشأ مخالفة ولا خصم، ولكن أغلق السجل
+    try:
+        skip_violation = is_day_off(absence_date, employee=record.employee, location=getattr(record, 'location', None), shift=getattr(record, 'shift', None))
+    except Exception:
+        skip_violation = False
+
+    if skip_violation:
+        deduction = Decimal("0")
+        violation = None
         _soft_delete_record(record)
+    else:
+        with transaction.atomic():
+            deduction = _apply_salary_deduction(record.employee)
+            violation = _create_violation(record, absence_date, deduction)
+            _soft_delete_record(record)
 
     notification_status = None
-    if notify:
+    if notify and not skip_violation:
         notification_status = _notify_employee(record.employee, absence_date, deduction)
 
     logger.info(

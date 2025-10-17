@@ -1,0 +1,100 @@
+{% extends "admin/base_site.html" %}
+{% load static %}
+
+{% block content %}
+<div class="container" style="direction: rtl; text-align: right;">
+  <h1>تقرير الفترة</h1>
+  <p>من: <strong>{{ data.window.start }}</strong> — إلى: <strong>{{ data.window.end }}</strong></p>
+
+  <h2>الحضور</h2>
+  <ul>
+    <li>إجمالي العمليات: {{ data.attendance.total }}</li>
+    <li>حضور: {{ data.attendance.by_type.check_in }}</li>
+    <li>انصراف: {{ data.attendance.by_type.check_out }}</li>
+    <li>انصراف مبكر: {{ data.attendance.by_type.early_check_out }}</li>
+    <li>عمليات مع مخالفة: {{ data.attendance.violations }}</li>
+  </ul>
+  <details>
+    <summary>آخر إجراء لكل موظف (بحد 100)</summary>
+    <table class="table table-striped">
+      <thead>
+        <tr><th>الموظف</th><th>الإجراء</th><th>الوقت</th><th>الموقع</th><th>مخالفة؟</th></tr>
+      </thead>
+      <tbody>
+        {% for r in data.attendance.latest_per_employee %}
+          <tr>
+            <td>{{ r.employee }}</td>
+            <td>{{ r.action }}</td>
+            <td>{{ r.at }}</td>
+            <td>{{ r.location|default:"-" }}</td>
+            <td>{% if r.violation %}نعم{% else %}لا{% endif %}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="5">لا توجد بيانات في هذه الفترة.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </details>
+
+  <h2>التتبّع الجغرافي</h2>
+  <ul>
+    <li>عدد النبضات: {{ data.tracking.pings_total }}</li>
+    <li>داخل النطاق: {{ data.tracking.inside }}</li>
+    <li>خارج النطاق: {{ data.tracking.outside }}</li>
+    <li>مخالفات انسحاب (مسجلة): {{ data.tracking.withdrawal_violations }}</li>
+    <li>إيقافات فعّالة للمخالفة: {{ data.tracking.pauses_active }}</li>
+  </ul>
+
+  {% if data.tracking.pauses %}
+    <details>
+      <summary>تفاصيل الإيقافات الفعّالة</summary>
+      <table class="table table-bordered">
+        <thead>
+          <tr><th>الموظف</th><th>الموقع</th><th>من</th><th>إلى</th><th>السبب</th></tr>
+        </thead>
+        <tbody>
+          {% for p in data.tracking.pauses %}
+            <tr>
+              <td>{{ p.employee }}</td>
+              <td>{{ p.location }}</td>
+              <td>{{ p.from }}</td>
+              <td>{{ p.until }}</td>
+              <td>{{ p.reason|default:"-" }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </details>
+  {% endif %}
+
+  {% if data.tracking.incidents %}
+    <h3>أحداث التتبّع</h3>
+    <ul>
+      {% for k,v in data.tracking.incidents.items %}
+        <li>{{ k }}: {{ v }}</li>
+      {% endfor %}
+    </ul>
+  {% endif %}
+
+  <h2>المخالفات</h2>
+  {% if data.violations_by_rule %}
+    <ul>
+      {% for k, v in data.violations_by_rule.items %}
+        <li>{{ k|default:"غير محدد" }}: {{ v }}</li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p>لا توجد مخالفات في هذه الفترة.</p>
+  {% endif %}
+
+  <h2>التحققات المنطقية المفعّلة خلال التسجيل</h2>
+  <ul>
+    {% for line in data.logical_checks %}
+      <li>{{ line }}</li>
+    {% endfor %}
+  </ul>
+
+  <p class="text-muted">يمكن الحصول على نفس التقرير كـ JSON عبر إضافة ‎?format=json إلى الرابط.</p>
+</div>
+{% endblock %}
+
