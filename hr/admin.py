@@ -193,9 +193,11 @@ class JobApplicationAdmin(admin.ModelAdmin):
                         "hr/contract_pdf_template.html",
                         {
                             "contract": contract,
-                            "signed_at": None,
-                            "signature_url": None,
                             "company_name": "شركة سنام للأمن",
+                            "company_signature_url": None,
+                            "company_signed_at": None,
+                            "employee_signature_url": None,
+                            "employee_signed_at": None,
                         },
                     )
                     unsigned_dir = os.path.join(settings.MEDIA_ROOT, "contracts", "unsigned")

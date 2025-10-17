@@ -121,9 +121,11 @@ def contract_sign_submit(request, pk):
 
     html_str = render_to_string("hr/contract_pdf_template.html", {
         "contract": contract,
-        "signed_at": contract.signed_at,
-        "signature_url": contract.signature_image.url,
         "company_name": "شركة سنام للأمن",
+        "company_signature_url": getattr(contract.company_signature_image, 'url', None),
+        "company_signed_at": contract.company_signed_at,
+        "employee_signature_url": getattr(contract.signature_image, 'url', None),
+        "employee_signed_at": contract.signed_at,
     })
 
     pdf_name = f"contract_{contract.pk}_signed_{ts}.pdf"
@@ -213,9 +215,11 @@ def contract_sign_public_submit(request, pk, token):
     # توليد PDF
     html_str = render_to_string("hr/contract_pdf_template.html", {
         "contract": contract,
-        "signed_at": contract.signed_at,
-        "signature_url": contract.signature_image.url,
         "company_name": "شركة سنام للأمن",
+        "company_signature_url": getattr(contract.company_signature_image, 'url', None),
+        "company_signed_at": contract.company_signed_at,
+        "employee_signature_url": getattr(contract.signature_image, 'url', None),
+        "employee_signed_at": contract.signed_at,
     })
     pdf_name = f"contract_{contract.pk}_signed_{ts}.pdf"
     pdf_dir = os.path.join(settings.MEDIA_ROOT, "contracts", "signed")
@@ -268,6 +272,33 @@ def contract_company_sign_submit(request, pk):
 
     contract.mark_company_signed(user=request.user)
     contract.save(update_fields=["company_signature_image"])  # الحقل حُدّث أعلاه
+
+    # جدد ملف PDF بالعقد ممهورًا بتوقيع الإدارة (قبل توقيع الموظف)
+    try:
+        html_str = render_to_string(
+            "hr/contract_pdf_template.html",
+            {
+                "contract": contract,
+                "company_name": "شركة سنام للأمن",
+                "company_signature_url": getattr(contract.company_signature_image, 'url', None),
+                "company_signed_at": contract.company_signed_at,
+                "employee_signature_url": getattr(contract.signature_image, 'url', None),
+                "employee_signed_at": contract.signed_at,
+            },
+        )
+        ts2 = timezone.now().strftime("%Y%m%d%H%M%S")
+        pdf_dir2 = os.path.join(settings.MEDIA_ROOT, "contracts", "company_signed")
+        os.makedirs(pdf_dir2, exist_ok=True)
+        pdf_name2 = f"contract_{contract.pk}_company_signed_{ts2}.pdf"
+        pdf_path2 = os.path.join(pdf_dir2, pdf_name2)
+        HTML(string=html_str, base_url=request.build_absolute_uri('/')).write_pdf(
+            pdf_path2,
+            stylesheets=[CSS(string='@page { size: A4; margin: 20mm; } body { font-family: "Tajawal", Arial, sans-serif; }')]
+        )
+        with open(pdf_path2, "rb") as f:
+            contract.file.save(pdf_name2, File(f), save=True)
+    except Exception:
+        pass
 
     messages.success(request, "تم توقيع الإدارة على العقد.")
     return JsonResponse({"ok": True, "company_signed": True})

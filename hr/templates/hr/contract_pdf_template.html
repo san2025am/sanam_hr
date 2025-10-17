@@ -24,12 +24,14 @@
 
   <div class="sign">
     <div>
-      <div><strong>توقيع الموظف:</strong></div>
-      {% if signature_url %}<img src="{{ signature_url }}">{% else %}<div>—</div>{% endif %}
+      <div><strong>توقيع الإدارة:</strong></div>
+      {% if company_signature_url %}<img src="{{ company_signature_url }}">{% else %}<div>—</div>{% endif %}
+      <div style="font-size:12px;color:#666">{{ company_signed_at }}</div>
     </div>
     <div>
-      <div><strong>ختم الزمن:</strong></div>
-      <div>{{ signed_at }}</div>
+      <div><strong>توقيع الموظف:</strong></div>
+      {% if employee_signature_url %}<img src="{{ employee_signature_url }}">{% else %}<div>—</div>{% endif %}
+      <div style="font-size:12px;color:#666">{{ employee_signed_at }}</div>
     </div>
   </div>
 </body>
