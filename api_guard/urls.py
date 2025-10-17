@@ -29,6 +29,7 @@ from api_guard.api_flutter import (
     LeaveBalanceView,
     LeaveApplyView,
     PayslipView,
+    MonthHolidaysView,
     RewardsListView,
     OvertimeListView,
     MarkItemPaidView,
@@ -68,4 +69,5 @@ urlpatterns = [
     path("payroll/rewards/", RewardsListView.as_view(), name="payroll-rewards"),
     path("payroll/overtime/", OvertimeListView.as_view(), name="payroll-overtime"),
     path("payroll/items/<uuid:pk>/mark-paid/", MarkItemPaidView.as_view(), name="payroll-item-mark-paid"),
+    path("holidays/month/<int:y>-<int:m>/", MonthHolidaysView.as_view(), name="holidays-month"),
 ]

@@ -129,6 +129,7 @@ class PayslipView(APIView):
         payload = {
             'year': y,
             'month': m,
+            'status': cycle.status,
             'base_salary': float(item.base_salary or 0),
             'daily_rate': float(item.daily_rate or 0),
             'default_working_days': float(item.default_working_days or 0),
@@ -144,6 +145,32 @@ class PayslipView(APIView):
             'item_id': str(item.id),
         }
         return Response(payload)
+
+
+class MonthHolidaysView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, y: int, m: int):
+        emp = _user_employee(request)
+        # ابني قائمة الأيام 1..N مع حالة يوم العطلة + سبب مختصر
+        tz = timezone.get_current_timezone()
+        # حدد عدد الأيام في الشهر
+        from calendar import monthrange
+        _, days_in_month = monthrange(y, m)
+        results = []
+        for d in range(1, days_in_month + 1):
+            dt = date(y, m, d)
+            off = is_day_off(dt, employee=emp)
+            reason = None
+            if off:
+                if is_public_holiday(dt, employee=emp):
+                    reason = 'public_holiday'
+                elif is_weekly_off(dt, employee=emp):
+                    reason = 'weekly_off'
+                else:
+                    reason = 'local_exception'
+            results.append({'day': d, 'is_day_off': bool(off), 'reason': reason})
+        return Response({'year': y, 'month': m, 'days': results})
 
 
 class RewardsListView(APIView):
@@ -213,4 +240,3 @@ class MarkItemPaidView(APIView):
         item.detail = detail
         item.save(update_fields=['detail'])
         return Response({'ok': True, 'paid': True, 'paid_at': detail['paid_at']})
-
