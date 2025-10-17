@@ -126,12 +126,22 @@ def ensure_employee_on_accept(sender, instance: JobApplication, created: bool, *
             except Exception:
                 pass
 
-            emp = Employee.objects.create(
-                user=user,
-                full_name=instance.full_name,
-                national_id=instance.national_id,
-                phone_number=instance.phone,
-            )
+            # إنشاء سجل الموظف مع معالجة تعارضات التفرد بالربط الذكي
+            from django.db import IntegrityError
+            try:
+                emp = Employee.objects.create(
+                    user=user,
+                    full_name=instance.full_name,
+                    national_id=(instance.national_id or '').strip(),
+                    phone_number=(instance.phone or '').strip(),
+                )
+            except IntegrityError:
+                # إن وُجد موظف بنفس الهوية أو الجوال، اربط به بدل الإنشاء
+                emp = (Employee.objects.filter(national_id=(instance.national_id or '').strip()).first()
+                       or Employee.objects.filter(phone_number=(instance.phone or '').strip()).first())
+                if not emp:
+                    # حالة نادرة: التعارض على user أو غيره — لا تفشل بصمت
+                    raise
         # اربط الطلب بالموظف
         if not instance.employee_id and emp:
             JobApplication.objects.filter(pk=instance.pk).update(employee=emp)

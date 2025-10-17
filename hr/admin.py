@@ -40,6 +40,7 @@ class JobApplicationAdmin(admin.ModelAdmin):
         "send_status_email_action",
         "create_year_contract_and_send_link",
         "prepare_employee_and_goto_contract",
+        "ensure_employee_link_action",
     ]
 
     # عمود إجراءات سريعة
@@ -64,49 +65,58 @@ class JobApplicationAdmin(admin.ModelAdmin):
 
         # عند التحويل إلى "مقبول": اربط الموظف أو أنشئه إذا لم يكن موجودًا
         if status_changed and obj.status == JobApplication.Status.ACCEPTED:
-            # لا تربط إلا إذا طابق رقم الهوية ورقم الجوال معًا لتجنب ربط خاطئ
-            emp = obj.employee or Employee.objects.filter(
-                national_id=obj.national_id,
-                phone_number=obj.phone,
-            ).first()
-            if not emp:
-                # أنشئ User + Employee من بيانات الطلب
-                UserModel = get_user_model()
-                # توليد اسم مستخدم بصيغة sa+6 أرقام بشكل فريد
-                import secrets, string
-                def _gen_username():
-                    return 'sa' + ''.join(secrets.choice(string.digits) for _ in range(6))
-                username = None
-                for _ in range(10):
-                    cand = _gen_username()
-                    if not UserModel.objects.filter(username__iexact=cand).exists():
-                        username = cand
-                        break
-                if username is None:
-                    username = _gen_username()
+            try:
+                emp = obj.employee or Employee.objects.filter(
+                    national_id=obj.national_id.strip(),
+                    phone_number=obj.phone.strip(),
+                ).first()
+                if not emp:
+                    # أنشئ User + Employee من بيانات الطلب
+                    UserModel = get_user_model()
+                    # توليد اسم مستخدم بصيغة sa+6 أرقام بشكل فريد
+                    import secrets, string
+                    def _gen_username():
+                        return 'sa' + ''.join(secrets.choice(string.digits) for _ in range(6))
+                    username = None
+                    for _ in range(10):
+                        cand = _gen_username()
+                        if not UserModel.objects.filter(username__iexact=cand).exists():
+                            username = cand
+                            break
+                    username = username or _gen_username()
 
-                user = UserModel.objects.create(
-                    username=username,
-                    email=(obj.email or '').strip(),
-                )
-                # عيّن دور الحارس إن وُجد
-                try:
-                    guard_role = Role.objects.filter(name='guard').first()
-                    if guard_role:
-                        user.role = guard_role
-                        user.save(update_fields=['role'])
-                except Exception:
-                    pass
+                    user = UserModel.objects.create(
+                        username=username,
+                        email=(obj.email or '').strip(),
+                    )
+                    # عيّن دور الحارس إن وُجد
+                    try:
+                        guard_role = Role.objects.filter(name='guard').first()
+                        if guard_role:
+                            user.role = guard_role
+                            user.save(update_fields=['role'])
+                    except Exception:
+                        pass
 
-                # أنشئ سجل الموظف
-                emp = Employee.objects.create(
-                    user=user,
-                    full_name=obj.full_name,
-                    national_id=obj.national_id,
-                    phone_number=obj.phone,
-                )
-                obj.employee = emp
-                obj.save(update_fields=["employee"])
+                    # أنشئ سجل الموظف مع معالجة تعارض التفرد بالربط
+                    from django.db import IntegrityError
+                    try:
+                        emp = Employee.objects.create(
+                            user=user,
+                            full_name=obj.full_name,
+                            national_id=obj.national_id.strip(),
+                            phone_number=obj.phone.strip(),
+                        )
+                    except IntegrityError:
+                        emp = (Employee.objects.filter(national_id=obj.national_id.strip()).first()
+                               or Employee.objects.filter(phone_number=obj.phone.strip()).first())
+                        if not emp:
+                            raise
+                    obj.employee = emp
+                    obj.save(update_fields=["employee"])
+            except Exception as exc:
+                self.message_user(request, f"تعذّر إنشاء الموظف: {exc}", level=messages.ERROR)
+                return
             if obj.employee_id:
                 add_url = reverse("admin:api_guard_contract_add") + f"?employee={obj.employee.pk}"
                 self.message_user(
@@ -243,4 +253,58 @@ class JobApplicationAdmin(admin.ModelAdmin):
         add_url = reverse("admin:api_guard_contract_add") + f"?employee={emp.pk}"
         self.message_user(request, format_html('جاهز! <a href="{}" target="_blank">فتح صفحة إضافة عقد</a>', add_url))
     prepare_employee_and_goto_contract.short_description = "تهيئة الموظف وفتح صفحة إضافة عقد"
+
+    # إجراء: ضمان إنشاء/ربط الموظف للطلبات المحددة (خاصة المقبولة)
+    def ensure_employee_link_action(self, request, queryset):
+        created, linked, skipped, failed = 0, 0, 0, 0
+        UserModel = get_user_model()
+        import secrets, string
+        def _gen_username():
+            return 'sa' + ''.join(secrets.choice(string.digits) for _ in range(6))
+
+        for app in queryset:
+            try:
+                if (app.status or '').strip() != app.Status.ACCEPTED:
+                    skipped += 1
+                    continue
+                if app.employee_id:
+                    linked += 1
+                    continue
+                emp = Employee.objects.filter(
+                    national_id=(app.national_id or '').strip(),
+                    phone_number=(app.phone or '').strip(),
+                ).first()
+                if not emp:
+                    username = None
+                    for _ in range(10):
+                        cand = _gen_username()
+                        if not UserModel.objects.filter(username__iexact=cand).exists():
+                            username = cand
+                            break
+                    username = username or _gen_username()
+                    user = UserModel.objects.create(
+                        username=username,
+                        email=(app.email or '').strip(),
+                    )
+                    try:
+                        guard_role = Role.objects.filter(name='guard').first()
+                        if guard_role:
+                            user.role = guard_role
+                            user.save(update_fields=['role'])
+                    except Exception:
+                        pass
+                    emp = Employee.objects.create(
+                        user=user,
+                        full_name=app.full_name,
+                        national_id=(app.national_id or '').strip(),
+                        phone_number=(app.phone or '').strip(),
+                    )
+                    created += 1
+                app.employee = emp
+                app.save(update_fields=['employee'])
+                linked += 1
+            except Exception:
+                failed += 1
+        self.message_user(request, f"تم إنشاء {created} موظف، وربط {linked}، وتخطّي {skipped}، وفشل {failed}.")
+    ensure_employee_link_action.short_description = "ضمان إنشاء/ربط الموظف للطلبات المحددة"
      
