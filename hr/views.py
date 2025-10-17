@@ -122,8 +122,12 @@ def contract_sign_submit(request, pk):
     html_str = render_to_string("hr/contract_pdf_template.html", {
         "contract": contract,
         "company_name": "شركة سنام للأمن",
+        "employee_name": getattr(contract.employee, 'full_name', ''),
         "company_signature_url": getattr(contract.company_signature_image, 'url', None),
         "company_signed_at": contract.company_signed_at,
+        "company_signer_name": (getattr(getattr(contract, 'company_signed_by', None), 'employee', None).full_name
+                                  if getattr(getattr(contract, 'company_signed_by', None), 'employee', None)
+                                  else (getattr(getattr(contract, 'company_signed_by', None), 'get_full_name', lambda: '')() or getattr(getattr(contract, 'company_signed_by', None), 'username', None))),
         "employee_signature_url": getattr(contract.signature_image, 'url', None),
         "employee_signed_at": contract.signed_at,
     })
@@ -216,8 +220,12 @@ def contract_sign_public_submit(request, pk, token):
     html_str = render_to_string("hr/contract_pdf_template.html", {
         "contract": contract,
         "company_name": "شركة سنام للأمن",
+        "employee_name": getattr(contract.employee, 'full_name', ''),
         "company_signature_url": getattr(contract.company_signature_image, 'url', None),
         "company_signed_at": contract.company_signed_at,
+        "company_signer_name": (getattr(getattr(contract, 'company_signed_by', None), 'employee', None).full_name
+                                  if getattr(getattr(contract, 'company_signed_by', None), 'employee', None)
+                                  else (getattr(getattr(contract, 'company_signed_by', None), 'get_full_name', lambda: '')() or getattr(getattr(contract, 'company_signed_by', None), 'username', None))),
         "employee_signature_url": getattr(contract.signature_image, 'url', None),
         "employee_signed_at": contract.signed_at,
     })
@@ -280,8 +288,12 @@ def contract_company_sign_submit(request, pk):
             {
                 "contract": contract,
                 "company_name": "شركة سنام للأمن",
+                "employee_name": getattr(contract.employee, 'full_name', ''),
                 "company_signature_url": getattr(contract.company_signature_image, 'url', None),
                 "company_signed_at": contract.company_signed_at,
+                "company_signer_name": (getattr(getattr(contract, 'company_signed_by', None), 'employee', None).full_name
+                                          if getattr(getattr(contract, 'company_signed_by', None), 'employee', None)
+                                          else (getattr(getattr(contract, 'company_signed_by', None), 'get_full_name', lambda: '')() or getattr(getattr(contract, 'company_signed_by', None), 'username', None))),
                 "employee_signature_url": getattr(contract.signature_image, 'url', None),
                 "employee_signed_at": contract.signed_at,
             },

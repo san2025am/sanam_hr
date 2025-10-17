@@ -1118,6 +1118,28 @@ class Contract(models.Model):
         verbose_name_plural = "13. العقود"
 
 
+@receiver(post_save, sender=Contract)
+def _sync_salary_on_contract_save(sender, instance: Contract, **kwargs):
+    """
+    مزامنة الراتب الأساسي مع جدول الرواتب عند حفظ العقد (إن كانت قيمة salary موجودة).
+    تُنفّذ عند كل حفظ للعقد لضمان التوافق حتى لو أُنشئ العقد قبل التوقيع.
+    """
+    try:
+        if instance.salary is None:
+            return
+        salary_obj, _ = Salary.objects.get_or_create(employee=instance.employee)
+        # إذا تغيّرت القيمة أو كانت 0، حدّثها
+        if salary_obj.base_salary != instance.salary:
+            salary_obj.base_salary = instance.salary
+            try:
+                salary_obj.save(update_fields=['base_salary', 'updated_at'])
+            except Exception:
+                salary_obj.save()
+    except Exception:
+        # لا تُعطّل الحفظ إن فشلت المزامنة لأي سبب
+        pass
+
+
 class Advance(BaseModel):
     STATUS_CHOICES = [
         ('pending', 'قيد المراجعة'),

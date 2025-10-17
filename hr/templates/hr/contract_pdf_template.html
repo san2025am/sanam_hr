@@ -10,8 +10,12 @@
     h1 { font-size: 18px; margin: 0 0 10px; color: var(--brand); }
     .meta { font-size: 12px; color: #555; margin-bottom: 12px; }
     .box { border: 1px solid #ccc; padding: 12px; border-radius: 6px; }
-    .sign { margin-top: 24px; display: flex; gap: 16px; align-items: center; }
-    .sign img { max-height: 100px; border: 1px dashed #999; padding: 6px; }
+    .parties { font-size: 13px; margin: 8px 0 12px; color:#333 }
+    .sign { margin-top: 18px; display: flex; gap: 18px; align-items: flex-start; }
+    .sign .slot { border: 1px solid #ddd; padding: 8px; border-radius: 6px; width: 48%; }
+    .sign .slot h3 { margin: 0 0 6px; font-size: 13px; color:#444 }
+    .sign img { max-height: 70px; border: 1px dashed #999; padding: 4px; background:#fff }
+    .sign .who { font-size: 12px; color:#666; margin-top: 4px; }
   </style>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Tajawal:wght@400;600;700&display=swap" rel="stylesheet">
@@ -20,18 +24,19 @@
   <h1>{{ company_name }} — {{ contract.title }}</h1>
   <div class="meta">الموظف: {{ contract.employee.full_name }} | رقم الهوية: {{ contract.employee.national_id }}</div>
   <div class="meta">تاريخ البداية: {{ contract.start_date }}{% if contract.end_date %} — تاريخ النهاية: {{ contract.end_date }}{% endif %} | الراتب: {{ contract.salary }}</div>
+  <div class="parties">الطرف الأول: {{ company_name }} — الطرف الثاني: {{ employee_name }}</div>
   <div class="box">{{ contract.body|linebreaks }}</div>
 
   <div class="sign">
-    <div>
-      <div><strong>توقيع الإدارة:</strong></div>
+    <div class="slot">
+      <h3>توقيع الطرف الأول (الإدارة)</h3>
       {% if company_signature_url %}<img src="{{ company_signature_url }}">{% else %}<div>—</div>{% endif %}
-      <div style="font-size:12px;color:#666">{{ company_signed_at }}</div>
+      <div class="who">الموقّع: {{ company_signer_name }} — {{ company_signed_at }}</div>
     </div>
-    <div>
-      <div><strong>توقيع الموظف:</strong></div>
+    <div class="slot">
+      <h3>توقيع الطرف الثاني (الموظف)</h3>
       {% if employee_signature_url %}<img src="{{ employee_signature_url }}">{% else %}<div>—</div>{% endif %}
-      <div style="font-size:12px;color:#666">{{ employee_signed_at }}</div>
+      <div class="who">الموظف: {{ employee_name }} — {{ employee_signed_at }}</div>
     </div>
   </div>
 </body>
