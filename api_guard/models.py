@@ -1121,10 +1121,13 @@ class Contract(models.Model):
 @receiver(post_save, sender=Contract)
 def _sync_salary_on_contract_save(sender, instance: Contract, **kwargs):
     """
-    مزامنة الراتب الأساسي مع جدول الرواتب عند حفظ العقد (إن كانت قيمة salary موجودة).
-    تُنفّذ عند كل حفظ للعقد لضمان التوافق حتى لو أُنشئ العقد قبل التوقيع.
+    مزامنة الراتب مع جدول الرواتب بعد توقيع الموظف فقط.
+    تُنفّذ بعد كل حفظ للعقد، لكنها تتخطى المزامنة إذا لم يوقّع الموظف بعد.
     """
     try:
+        # لا تزامن قبل توقيع الموظف
+        if not getattr(instance, 'signed_by_employee', False):
+            return
         if instance.salary is None:
             return
         salary_obj, _ = Salary.objects.get_or_create(employee=instance.employee)

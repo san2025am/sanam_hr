@@ -41,6 +41,12 @@ from django.core.exceptions import ValidationError
 from django import forms
 from django.utils.html import format_html
 from django.urls import reverse
+from django.template.loader import render_to_string
+from django.conf import settings
+from django.utils import timezone
+from django.core.files import File
+from weasyprint import HTML, CSS
+import os
 
 from .models import Employee, Contract, AdditionalQualification
 from hr.utils.contracts import (
@@ -577,6 +583,40 @@ class ContractAdmin(admin.ModelAdmin):
                 obj.mark_company_signed(user=request.user)
             except Exception:
                 pass
+
+        # توليد وحفظ PDF في حقل file إذا كان فارغًا
+        try:
+            must_generate = not bool(getattr(obj, 'file', None) and getattr(obj.file, 'name', ''))
+            if must_generate and getattr(obj, 'pk', None):
+                ctx = {
+                    'contract': obj,
+                    'company_name': 'شركة سنام للأمن',
+                    'employee_name': getattr(getattr(obj, 'employee', None), 'full_name', ''),
+                    'company_signature_url': (getattr(obj.company_signature_image, 'url', None)
+                                              if getattr(obj, 'company_signature_image', None) else None),
+                    'company_signed_at': getattr(obj, 'company_signed_at', None),
+                    'company_signer_name': (getattr(getattr(obj, 'company_signed_by', None), 'employee', None).full_name
+                                             if getattr(getattr(obj, 'company_signed_by', None), 'employee', None)
+                                             else (getattr(getattr(obj, 'company_signed_by', None), 'get_full_name', lambda: '')() or getattr(getattr(obj, 'company_signed_by', None), 'username', None))),
+                    'employee_signature_url': (getattr(obj.signature_image, 'url', None)
+                                               if getattr(obj, 'signature_image', None) else None),
+                    'employee_signed_at': getattr(obj, 'signed_at', None),
+                }
+                html = render_to_string('hr/contract_pdf_template.html', ctx)
+                ts = timezone.now().strftime('%Y%m%d%H%M%S')
+                out_dir = os.path.join(settings.MEDIA_ROOT, 'contracts', 'generated')
+                os.makedirs(out_dir, exist_ok=True)
+                out_name = f"contract_{obj.pk}_generated_{ts}.pdf"
+                out_path = os.path.join(out_dir, out_name)
+                HTML(string=html, base_url=request.build_absolute_uri('/')).write_pdf(
+                    out_path,
+                    stylesheets=[CSS(string='@page { size: A4; margin: 20mm; } body { font-family: "Tajawal", Arial, sans-serif; }')]
+                )
+                with open(out_path, 'rb') as f:
+                    obj.file.save(out_name, File(f), save=True)
+        except Exception:
+            # لا تفشل الحفظ في حال تعذّر توليد PDF لأي سبب
+            pass
 
     def quick_tools(self, obj):
         # عند الإضافة لأول مرة أو قبل حفظ الكائن لا يوجد pk ⇒ لا روابط أدوات
