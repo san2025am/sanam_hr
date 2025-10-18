@@ -132,6 +132,7 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt.token_blacklist',
 ]
 AUTH_USER_MODEL = 'api_guard.User'
+INSTALLED_APPS += ['core']
 INSTALLED_APPS += ['hr']
 INSTALLED_APPS += ['policies']
 INSTALLED_APPS += ['payroll']
@@ -142,6 +143,8 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'core.middleware.CurrentUserMiddleware',
+    'sanam_project.middleware.RedirectPerFunction',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]

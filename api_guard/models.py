@@ -1086,7 +1086,7 @@ class EmployeeViolation(BaseModel):
 
 
 
-class Contract(models.Model):
+class Contract(BaseModel):
     employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name="contracts", verbose_name="الموظف")
     title = models.CharField(max_length=200, verbose_name="عنوان العقد", default="عقد عمل")
     contract_type = models.CharField(max_length=100, verbose_name="نوع العقد", blank=True)
@@ -1108,7 +1108,6 @@ class Contract(models.Model):
     company_signature_image = models.ImageField(upload_to="contracts/company_signatures/", blank=True, null=True, verbose_name="توقيع الإدارة")
     company_signed_at = models.DateTimeField(blank=True, null=True, verbose_name="وقت توقيع الإدارة")
     company_signed_by = models.ForeignKey('api_guard.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='company_signed_contracts', verbose_name="وقّعه من الإدارة")
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name="أُنشئ في")
     sign_token = models.CharField(max_length=64, blank=True, null=True, unique=True, verbose_name="رمز توقيع عام")
     sign_token_expires_at = models.DateTimeField(blank=True, null=True, verbose_name="صلاحية رابط التوقيع")
 

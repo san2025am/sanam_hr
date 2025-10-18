@@ -4,6 +4,8 @@ from django.db import models
 from django.utils.translation import gettext_lazy as _
 from django.utils import timezone
 
+from core.models import BaseModel
+
 from api_guard.models import Employee, Role
 from django.db.models.signals import post_save
 from django.dispatch import receiver
@@ -11,7 +13,7 @@ from django.contrib.auth import get_user_model
 
 # في حال لديك Employee جاهز في تطبيق آخر، استبدل هذا النموذج بربط ForeignKey/N:1 لنموذجك.
 
-class JobApplication(models.Model):
+class JobApplication(BaseModel):
     class Position(models.TextChoices):
         GUARD = "guard", _("حارس أمن")
         SUPERVISOR = "supervisor", _("مشرف")
@@ -26,8 +28,6 @@ class JobApplication(models.Model):
     resume = models.FileField(upload_to="applications/resumes/", verbose_name="السيرة الذاتية", blank=True, null=True)
     qualification_document = models.FileField(upload_to="applications/qualifications/", verbose_name="المؤهل العلمي", blank=True, null=True)
     cover_letter = models.TextField(verbose_name="رسالة توضيحية", blank=True)
-
-    created_at = models.DateTimeField(auto_now_add=True, verbose_name="تاريخ التقديم")
 
     class Status(models.TextChoices):
         NEW = "new", _("جديد")
@@ -82,7 +82,9 @@ class JobApplication(models.Model):
         if errors:
             raise ValidationError(errors)
 
-
+    class Meta:
+        verbose_name = "طلب وظيفة"
+        verbose_name_plural = "طلبات وظائف"
 # ===== إلحاق الموظف تلقائيًا بعد قبول الطلب =====
 @receiver(post_save, sender=JobApplication)
 def ensure_employee_on_accept(sender, instance: JobApplication, created: bool, **kwargs):

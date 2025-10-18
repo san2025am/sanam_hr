@@ -28,14 +28,24 @@ from rest_framework_simplejwt.views import (
 from django.http import HttpResponse
 from django.conf import settings
 from django.conf.urls.static import static
+import sanam_project.app_admin_registry  # مهم لتنفيذ التسجيل
+from sanam_project.admin_sites import hr_admin, finance_admin, ops_admin, log_admin
+from django.views.generic import RedirectView as _Redirect
 
 urlpatterns = [
+    # Handy admin aliases (before binding the whole /admin/hr/ tree)
+    path('admin/hr/jobapplication/', _Redirect.as_view(url='/admin/hr/hr/jobapplication/', permanent=False)),
+    # Functional admin sites under /admin/* must be placed before generic admin includes
+    path("admin/hr/", hr_admin.urls),
+    path("admin/finance/", finance_admin.urls),
+    path("admin/ops/", ops_admin.urls),
+    path("admin/logistics/", log_admin.urls),
     # Redirect /admin/ to the custom dashboard
     path('admin/', RedirectView.as_view(pattern_name='admin_extras:dashboard', permanent=False)),
     # Admin extras (dashboard + chat) under /admin/* must come before admin.site.urls
     path('admin/', include('admin_extras.urls', namespace='admin_extras')),
     path('admin/', admin.site.urls),
-   path('', lambda request: HttpResponse('API is running')),
+    path('', lambda request: HttpResponse('API is running')),
     # هذا السطر صحيح ومهم، لكنه يعالج فقط الروابط داخل تطبيق api_guard
     # مثل /api/v1/users/me/
     path('api/v1/', include('api_guard.urls')), 
