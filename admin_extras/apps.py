@@ -5,5 +5,6 @@ class AdminExtrasConfig(AppConfig):
     name = "admin_extras"
     verbose_name = "إضافات لوحة الإدارة"
     def ready(self):
-        # تحميل group_admin لضمان تسجيله
+        # تسجيل تحسينات الإدارة
         from . import group_admin  # noqa
+        from . import section_admin  # noqa

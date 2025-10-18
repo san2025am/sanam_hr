@@ -3,27 +3,49 @@ from django.contrib.contenttypes.models import ContentType
 
 # قوائم الموديلات لكل قسم (استخدم نفس التقسيم الوظيفي لديك)
 HR_MODELS = [
-    ("api_guard","Employee"), ("api_guard","Role"), ("api_guard","Contract"),
-    ("api_guard","MonthlyLeaveBalance"), ("hr","JobApplication"),
-    ("policies","PolicyGoal"), ("policies","WeeklyRestDay"), ("policies","PolicyException"),
-    ("policies","PolicyBundle"), ("policies","DailyLeavePolicy"),
+    ("api_guard", "Contract"),
+    ("api_guard", "Employee"),
+    ("api_guard", "EmployeeLeaveBalance"),
+    ("api_guard", "Role"),
+    ("hr", "JobApplication"),
+    ("policies", "LeavePolicy"),
+    ("policies", "LocalException"),
+    ("policies", "PublicHoliday"),
+    ("policies", "WeeklyOff"),
 ]
 
 FINANCE_MODELS = [
-    ("payroll","PayrollConfig"), ("payroll","DailyRatePolicy"), ("payroll","PayrollCycle"),
-    ("payroll","DailyPayroll"), ("payroll","PayrollItem"), ("payroll","Bonus"),
-    ("api_guard","Salary"), ("api_guard","Advance"), ("api_guard","Custody"), ("api_guard","Report"),
+    ("api_guard", "Advance"),
+    ("api_guard", "Custody"),
+    ("api_guard", "Report"),
+    ("api_guard", "Salary"),
+    ("payroll", "Overtime"),
+    ("payroll", "PayrollConfig"),
+    ("payroll", "PayrollCycle"),
+    ("payroll", "PayrollItem"),
+    ("payroll", "Reward"),
 ]
 
 OPS_MODELS = [
-    ("api_guard","Location"), ("api_guard","LocationMonitoringConfig"), ("api_guard","GeofenceViolationPause"),
-    ("api_guard","EmployeeLocationAssignment"), ("api_guard","Shift"), ("api_guard","AttendanceRecord"),
-    ("api_guard","TrackingEvent"), ("api_guard","ViolationPolicy"), ("api_guard","EmployeeViolation"),
-    ("api_guard","Task"), ("api_guard","TrustedDevice"), ("api_guard","DeviceVerificationRequest"),
+    ("api_guard", "AttendanceRecord"),
+    ("api_guard", "DeviceLoginChallenge"),
+    ("api_guard", "EmployeeLocationAssignment"),
+    ("api_guard", "EmployeeShiftAssignment"),
+    ("api_guard", "GeofenceViolationPause"),
+    ("api_guard", "Location"),
+    ("api_guard", "LocationMonitoringConfig"),
+    ("api_guard", "LocationPing"),
+    ("api_guard", "Shift"),
+    ("api_guard", "Task"),
+    ("api_guard", "TrackingIncident"),
+    ("api_guard", "TrustedDevice"),
 ]
 
 LOGISTICS_MODELS = [
-    ("api_guard","LogisticsRequest"), ("api_guard","UniformItem"), ("api_guard","UniformReceipt"),
+    ("api_guard", "LogisticRequest"),
+    ("api_guard", "UniformDelivery"),
+    ("api_guard", "UniformDeliveryItem"),
+    ("api_guard", "UniformItem"),
 ]
 
 SECTIONS = {
@@ -59,4 +81,3 @@ def get_permissions_for_section(section: str):
     يرجع set(Permission) لصلاحيات القسم.
     """
     return set(queryset_for_section(section))
-
