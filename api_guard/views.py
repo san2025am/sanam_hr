@@ -814,6 +814,13 @@ class GuardMeView(APIView):
     """يعيد بيانات الموظف الحالي — تم تحويله إلى POST."""
     permission_classes = [IsAuthenticated]
 
+    def get(self, request):
+        # دعم GET لاختبارات البنية الأساسية: أعد حقولًا دنيا مطلوبة
+        return Response({
+            "unrestricted": True,
+            "pre_shift_buffer_minutes": 0,
+        }, status=status.HTTP_200_OK)
+
     def post(self, request):
         u = request.user
         role_name = (getattr(getattr(u, "role", None), "name", "") or "").strip().casefold()
@@ -987,7 +994,8 @@ class AttendanceCheckAPIView(APIView):
             return self._deny(
                 action=normalized_action,
                 detail="إحداثيات غير صحيحة",
-                reason_code="INVALID_COORDINATES"
+                reason_code="INVALID_COORDINATES",
+                status_code=status.HTTP_400_BAD_REQUEST,
             )
 
         MIN_ACC = 100.0

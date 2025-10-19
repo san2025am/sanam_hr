@@ -5,7 +5,8 @@ Auto-added: module-level documentation and gentle guidance.
 This block is safe to remove if you prefer.
 """
 import math
-from typing import List, Tuple
+from typing import List, Tuple, Optional
+import re
 
 def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """المسافة بالمتر بين نقطتين (WGS84)."""
@@ -36,3 +37,43 @@ def point_in_polygon(point: Tuple[float, float], polygon: List[Tuple[float, floa
             if x_intersect > x:
                 inside = not inside
     return inside
+
+
+def parse_latlng_any(text: str) -> Optional[Tuple[float, float]]:
+    """
+    يحاول استخراج (lat, lng) من نص حر أو روابط خرائط شائعة.
+    يدعم صيغًا مثل:
+      - "24.7136, 46.6753"
+      - "https://maps.google.com/?q=24.7136,46.6753"
+      - "https://www.google.com/maps/@24.7136,46.6753,16z"
+      - "...ll=24.7136,46.6753" أو "...center=24.7136,46.6753"
+      - Apple Maps: "https://maps.apple.com/?ll=24.7136,46.6753"
+    يعيد None إذا تعذر الاستخراج أو كانت القيم خارج النطاق.
+    """
+    if not text:
+        return None
+    s = str(text).strip()
+
+    def _valid(lat: float, lng: float) -> bool:
+        return -90.0 <= lat <= 90.0 and -180.0 <= lng <= 180.0
+
+    # 1) معلمات الاستعلام: ll= أو q= أو center=
+    for key in ("ll", "q", "center"):
+        m = re.search(rf"[?&]{key}=([-+]?\d{{1,2}}(?:\.\d+)?),\s*([-+]?\d{{1,3}}(?:\.\d+)?)", s)
+        if m:
+            lat = float(m.group(1)); lng = float(m.group(2))
+            return (lat, lng) if _valid(lat, lng) else None
+
+    # 2) نمط @lat,lng في روابط Google Maps
+    m = re.search(r"@([-+]?\d{1,2}(?:\.\d+)?),\s*([-+]?\d{1,3}(?:\.\d+)?)", s)
+    if m:
+        lat = float(m.group(1)); lng = float(m.group(2))
+        return (lat, lng) if _valid(lat, lng) else None
+
+    # 3) أي زوج lat,lng ظاهر في النص
+    m = re.search(r"([-+]?\d{1,2}(?:\.\d+)?),\s*([-+]?\d{1,3}(?:\.\d+)?)", s)
+    if m:
+        lat = float(m.group(1)); lng = float(m.group(2))
+        return (lat, lng) if _valid(lat, lng) else None
+
+    return None

@@ -55,6 +55,17 @@ SECTIONS = {
     "Logistics": LOGISTICS_MODELS,
 }
 
+# تسميات عربية للأقسام لعرضها في الواجهات
+SECTION_LABELS = {
+    "HR": "الموارد البشرية",
+    "Finance": "الشؤون المالية",
+    "Operations": "العمليات",
+    "Logistics": "اللوجستيات",
+}
+
+def get_section_label(code: str) -> str:
+    return SECTION_LABELS.get(code, code)
+
 # أنواع الصلاحيات القياسية لكل موديل
 PERM_CODES = ("view", "add", "change", "delete")
 

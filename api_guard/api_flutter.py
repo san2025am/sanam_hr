@@ -16,6 +16,14 @@ from policies.models import PublicHoliday
 from api_guard.models import Employee, Request, EmployeeLeaveBalance
 from payroll.models import PayrollItem, Reward, Overtime
 from payroll.utils import get_or_create_cycle, build_item_for_employee
+from django.db.models import Q
+from django.contrib.auth import get_user_model
+from api_guard.models import BankAccount, BankChangeRequest
+from api_guard.services.bank_account import (
+    create_or_replace_pending_request,
+    approve_bank_change,
+    reject_bank_change,
+)
 
 
 def _user_employee(request) -> Employee:
@@ -171,6 +179,114 @@ class MonthHolidaysView(APIView):
                     reason = 'local_exception'
             results.append({'day': d, 'is_day_off': bool(off), 'reason': reason})
         return Response({'year': y, 'month': m, 'days': results})
+
+
+def _is_hr(user) -> bool:
+    try:
+        if user.is_superuser:
+            return True
+        role = getattr(user, 'role', None)
+        if role and getattr(role, 'name', '').strip().lower() == 'hr':
+            return True
+        from django.contrib.auth.models import Group
+        if user.groups.filter(name='HR').exists():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+class BankAccountMeView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        emp = _user_employee(request)
+        acc = getattr(emp, 'bank_account_rec', None)
+        data = None
+        if acc:
+            data = {
+                'bank_name': acc.bank_name,
+                'iban': acc.iban,
+                'account_holder': acc.account_holder,
+                'swift_bic': acc.swift_bic,
+                'branch_name': acc.branch_name,
+                'updated_at': acc.updated_at.isoformat() if acc.updated_at else None,
+            }
+        else:
+            # توافق خلفي من حقول Employee
+            data = {
+                'bank_name': getattr(emp, 'bank_name', None),
+                'iban': getattr(emp, 'bank_account', None),
+                'account_holder': None,
+                'swift_bic': None,
+                'branch_name': None,
+                'updated_at': None,
+            }
+        return Response(data or {})
+
+
+class BankAccountMyRequestsView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        emp = _user_employee(request)
+        qs = BankChangeRequest.objects.filter(employee=emp).order_by('-created_at')
+        results = [
+            {
+                'id': r.id,
+                'status': r.status,
+                'requested_bank_name': r.requested_bank_name,
+                'requested_iban': r.requested_iban,
+                'note_from_employee': r.note_from_employee,
+                'hr_comment': r.hr_comment,
+                'decided_at': r.decided_at.isoformat() if r.decided_at else None,
+                'created_at': r.created_at.isoformat() if r.created_at else None,
+                'current_iban': r.current_iban,
+            }
+            for r in qs
+        ]
+        return Response({'results': results})
+
+
+class BankAccountChangeCreateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    class _Ser(serializers.Serializer):
+        requested_bank_name = serializers.CharField()
+        requested_iban = serializers.CharField()
+        requested_account_holder = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+        requested_swift_bic = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+        requested_branch_name = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+        note_from_employee = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+    def post(self, request):
+        emp = _user_employee(request)
+        ser = self._Ser(data=request.data)
+        ser.is_valid(raise_exception=True)
+        req = create_or_replace_pending_request(employee=emp, payload=ser.validated_data)
+        return Response({'id': req.id, 'status': req.status}, status=status.HTTP_201_CREATED)
+
+
+class BankAccountApproveView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if not _is_hr(request.user):
+            raise PermissionDenied('ليست لديك صلاحية')
+        comment = (request.data.get('hr_comment') or '').strip() or None
+        req = approve_bank_change(request_id=pk, reviewer=request.user, comment=comment)
+        return Response({'status': req.status})
+
+
+class BankAccountRejectView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pk):
+        if not _is_hr(request.user):
+            raise PermissionDenied('ليست لديك صلاحية')
+        comment = (request.data.get('hr_comment') or '').strip() or None
+        req = reject_bank_change(request_id=pk, reviewer=request.user, comment=comment)
+        return Response({'status': req.status})
 
 
 class RewardsListView(APIView):

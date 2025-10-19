@@ -33,6 +33,11 @@ from api_guard.api_flutter import (
     RewardsListView,
     OvertimeListView,
     MarkItemPaidView,
+    BankAccountMeView,
+    BankAccountMyRequestsView,
+    BankAccountChangeCreateView,
+    BankAccountApproveView,
+    BankAccountRejectView,
 )
 
 
@@ -70,4 +75,10 @@ urlpatterns = [
     path("payroll/overtime/", OvertimeListView.as_view(), name="payroll-overtime"),
     path("payroll/items/<uuid:pk>/mark-paid/", MarkItemPaidView.as_view(), name="payroll-item-mark-paid"),
     path("holidays/month/<int:y>-<int:m>/", MonthHolidaysView.as_view(), name="holidays-month"),
+    # Bank account endpoints
+    path("bank-account/me", BankAccountMeView.as_view(), name="bank-account-me"),
+    path("bank-account/requests/me", BankAccountMyRequestsView.as_view(), name="bank-account-my-requests"),
+    path("bank-account/requests", BankAccountChangeCreateView.as_view(), name="bank-account-requests"),
+    path("bank-account/requests/<int:pk>/approve", BankAccountApproveView.as_view(), name="bank-account-approve"),
+    path("bank-account/requests/<int:pk>/reject", BankAccountRejectView.as_view(), name="bank-account-reject"),
 ]

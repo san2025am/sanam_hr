@@ -3,13 +3,27 @@ from django.utils.html import format_html
 from django.urls import reverse
 
 from .models import FunctionalSection
-from sanam_project.permissions_presets import get_permissions_for_section, SECTIONS
+from sanam_project.permissions_presets import get_permissions_for_section, SECTIONS, SECTION_LABELS
+
+
+class SectionCodeFilter(admin.SimpleListFilter):
+    title = "القسم"
+    parameter_name = "code"
+
+    def lookups(self, request, model_admin):
+        return [(k, SECTION_LABELS.get(k, k)) for k in SECTIONS.keys()]
+
+    def queryset(self, request, queryset):
+        val = self.value()
+        if val:
+            return queryset.filter(code=val)
+        return queryset
 
 
 @admin.register(FunctionalSection)
 class FunctionalSectionAdmin(admin.ModelAdmin):
-    list_display = ("code", "title", "admin_link", "group", "perms_count", "is_active", "order")
-    list_filter = ("is_active", "group")
+    list_display = ("code_ar", "title", "admin_link", "group", "perms_count", "is_active", "order")
+    list_filter = (SectionCodeFilter, "is_active", "group")
     search_fields = ("code", "title", "admin_path")
     filter_horizontal = ("permissions",)
     fieldsets = (
@@ -21,6 +35,10 @@ class FunctionalSectionAdmin(admin.ModelAdmin):
     def admin_link(self, obj: FunctionalSection):
         url = (obj.admin_path or "").strip() or "#"
         return format_html('<a href="{}" target="_blank">فتح</a>', url)
+
+    @admin.display(description="الرمز")
+    def code_ar(self, obj: FunctionalSection):
+        return SECTION_LABELS.get(obj.code, obj.code)
 
     @admin.display(description="عدد الصلاحيات")
     def perms_count(self, obj: FunctionalSection):
@@ -88,4 +106,3 @@ class FunctionalSectionAdmin(admin.ModelAdmin):
             sec.group.permissions.remove(*perms)
             n += 1
         self.message_user(request, f"تمت إزالة صلاحيات {n} مجموعة مرتبطة.", messages.WARNING)
-

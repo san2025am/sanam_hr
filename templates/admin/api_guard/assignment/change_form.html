@@ -1,0 +1,56 @@
+{% extends "admin/change_form.html" %}
+{% load static %}
+
+{% block after_related_objects %}
+  {{ block.super }}
+  <div id="capacity-box" class="module aligned" style="margin-top:16px;border:1px solid #ddd;padding:12px;border-radius:8px;">
+    <h2 style="margin-top:0;">السعة المتاحة</h2>
+    <div style="display:flex;gap:16px;flex-wrap:wrap;">
+      <div><strong>الموقع:</strong> <span id="site-remaining">-</span> / <span id="site-total">-</span> (مستخدم: <span id="site-used">-</span>)</div>
+      <div><strong>الوردية:</strong> <span id="pair-remaining">-</span> / <span id="pair-total">-</span> (مستخدم: <span id="pair-used">-</span>)</div>
+    </div>
+    <small style="color:#666;">لا يمكن تجاوز سعة الموقع أو سعة الوردية. لزيادة السعة تواصل مع HR.</small>
+  </div>
+{% endblock %}
+
+{% block extrahead %}
+  {{ block.super }}
+  <script>
+    (function(){
+      function qs(sel){return document.querySelector(sel)}
+      function valueOf(sel){
+        var el = document.querySelector(sel);
+        if(!el) return null;
+        return el.value || el.getAttribute("value");
+      }
+      async function refresh(){
+        var loc = valueOf("#id_location");
+        var shf = valueOf("#id_shift");
+        if(!loc){ return; }
+        try{
+          const url = new URL(window.location.origin + "{% url 'admin:api_guard_assignment_capacity_info' %}");
+          url.searchParams.set("location", loc);
+          if(shf) url.searchParams.set("shift", shf);
+          const r = await fetch(url, {credentials:"same-origin"});
+          if(!r.ok) return;
+          const data = await r.json();
+          qs("#site-total").textContent = data.site_total;
+          qs("#site-used").textContent = data.site_used;
+          qs("#site-remaining").textContent = data.site_remaining;
+          qs("#pair-total").textContent = data.pair_total;
+          qs("#pair-used").textContent = data.pair_used;
+          qs("#pair-remaining").textContent = data.pair_remaining;
+        }catch(e){}
+      }
+      function bind(){
+        var loc = document.querySelector("#id_location");
+        var shf = document.querySelector("#id_shift");
+        if(loc){ loc.addEventListener("change", refresh); }
+        if(shf){ shf.addEventListener("change", refresh); }
+        setTimeout(refresh, 300);
+      }
+      document.addEventListener("DOMContentLoaded", bind);
+    })();
+  </script>
+{% endblock %}
+

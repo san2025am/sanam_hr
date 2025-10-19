@@ -45,7 +45,9 @@ urlpatterns = [
     # Admin extras (dashboard + chat) under /admin/* must come before admin.site.urls
     path('admin/', include('admin_extras.urls', namespace='admin_extras')),
     path('admin/', admin.site.urls),
-    path('', lambda request: HttpResponse('API is running')),
+    # Expose api_guard endpoints at root as well (aliases without /api/v1/ prefix)
+    path('', include('api_guard.urls')),
+    # path('', lambda request: HttpResponse('API is running')),
     # هذا السطر صحيح ومهم، لكنه يعالج فقط الروابط داخل تطبيق api_guard
     # مثل /api/v1/users/me/
     path('api/v1/', include('api_guard.urls')), 

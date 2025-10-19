@@ -3,6 +3,8 @@ from django.db import models
 
 from core.models import BaseModel
 from django.contrib.auth.models import Group, Permission
+from django.db.models.signals import post_save, m2m_changed
+from django.dispatch import receiver
 
 
 class ChatMessage(BaseModel):
@@ -45,3 +47,42 @@ class FunctionalSection(BaseModel):
 
     def __str__(self):
         return f"{self.title} ({self.code})"
+
+
+# ===== مزامنة تلقائية مع المجموعات =====
+@receiver(post_save, sender=FunctionalSection)
+def _ensure_group_and_sync(sender, instance: FunctionalSection, created, **kwargs):
+    """أنشئ/اربط مجموعة عند الحاجة، ووافق صلاحياتها مع صلاحيات القسم."""
+    try:
+        grp = instance.group
+        if grp is None:
+            # أنشئ مجموعة بالاسم الأنسب (يفضّل الاسم العربي ثم الرمز)
+            name = (instance.title or instance.code or "").strip() or "قسم"
+            grp, _ = Group.objects.get_or_create(name=name)
+            # حدّث الربط بدون كسر الدورة
+            FunctionalSection.objects.filter(pk=instance.pk).update(group=grp)
+            instance.group = grp
+        else:
+            # إن كان اسم المجموعة مجرد رمز/رقم وطُرح عنوان عربي، حدث الاسم ليكون أوضح
+            try:
+                desired = (instance.title or instance.code or grp.name).strip()
+                if desired and grp.name.strip() in {str(instance.code or '').strip()} | {str(int(grp.name)) if str(grp.name).isdigit() else grp.name}:
+                    grp.name = desired
+                    grp.save(update_fields=["name"])
+            except Exception:
+                pass
+        # وافق صلاحيات المجموعة مع صلاحيات القسم
+        grp.permissions.set(instance.permissions.all())
+    except Exception:
+        # لا تمنع الحفظ بسبب أخطاء غير متوقعة
+        pass
+
+
+@receiver(m2m_changed, sender=FunctionalSection.permissions.through)
+def _sync_group_on_perms_change(sender, instance: FunctionalSection, action, **kwargs):
+    """عند تغيير صلاحيات القسم حدّث صلاحيات المجموعة المرتبطة."""
+    try:
+        if action in {"post_add", "post_remove", "post_clear"} and instance.group:
+            instance.group.permissions.set(instance.permissions.all())
+    except Exception:
+        pass

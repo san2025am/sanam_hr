@@ -1,0 +1,45 @@
+{% extends "admin/change_form.html" %}
+{% load i18n admin_urls %}
+
+{% block after_related_objects %}
+  {{ block.super }}
+  <div class="module aligned" style="margin-top: 24px; border: 1px solid #ddd; padding: 16px; border-radius: 8px;">
+    <h2 style="margin-top: 0;">تطبيق صلاحيات قسم وظيفي</h2>
+    <form method="post" action="{% url 'admin:auth_group_apply_permissions' object_id=object_id %}">
+      {% csrf_token %}
+      <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+        <label for="id_section"><strong>اختر القسم:</strong></label>
+        <select name="section" id="id_section" required>
+          {% for key, label in sections_choices %}
+            <option value="{{ key }}">{{ label }}</option>
+          {% endfor %}
+        </select>
+
+        <label for="id_mode"><strong>الوضع:</strong></label>
+        <select name="mode" id="id_mode" required>
+          <option value="replace">استبدال الصلاحيات</option>
+          <option value="merge">دمج مع الحالية</option>
+        </select>
+
+        <button type="submit" class="button default">تطبيق</button>
+      </div>
+      <p style="margin-top:10px; color:#555;">
+        • <strong>استبدال</strong>: يضبط صلاحيات المجموعة لتطابق القسم فقط. <br>
+        • <strong>دمج</strong>: يضيف صلاحيات القسم إلى الصلاحيات الحالية بدون حذف الموجود.
+      </p>
+    </form>
+  </div>
+{% endblock %}
+
+{% block extrahead %}
+  {{ block.super }}
+{% endblock %}
+
+{% block content %}
+  {# اعرض المحتوى الافتراضي فقط لتفادي الاعتماد على قوالب غير موجودة في Jazzmin #}
+  {{ block.super }}
+{% endblock %}
+
+{% block footer %}
+  {{ block.super }}
+{% endblock %}
