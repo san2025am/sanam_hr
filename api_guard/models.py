@@ -929,8 +929,27 @@ class BankAccount(BaseModel):
         return f"{self.employee.full_name} — {self.bank_name}"
 
 def _iban_mod97_ok(iban: str) -> bool:
+    """Strict IBAN mod-97 check with Unicode digit normalization.
+    Accepts Arabic-Indic digits and strips all non-alphanumerics.
+    """
     try:
-        s = ''.join(ch for ch in iban.upper() if ch.isalnum())
+        import unicodedata as _ud
+
+        # Keep only letters/digits; uppercase letters; normalize digits to ASCII
+        chars = []
+        for ch in (iban or ''):
+            if ch.isalnum():
+                if ch.isalpha():
+                    chars.append(ch.upper())
+                else:
+                    # normalize any unicode digit to ASCII
+                    try:
+                        d = _ud.digit(ch)
+                        chars.append(str(int(d)))
+                    except Exception:
+                        # if not a recognized digit, skip
+                        return False
+        s = ''.join(chars)
         if len(s) < 4:
             return False
         # Move first 4 chars to end
@@ -938,14 +957,14 @@ def _iban_mod97_ok(iban: str) -> bool:
         # Convert letters to numbers A=10..Z=35
         num = ''
         for ch in reord:
-            if ch.isdigit():
-                num += ch
-            else:
+            if ch.isalpha():
                 num += str(ord(ch) - 55)
-        # Compute mod 97
+            else:
+                num += ch  # already ASCII digit
+        # Compute mod 97 incrementally to avoid big ints
         remainder = 0
         for c in num:
-            remainder = (remainder * 10 + int(c)) % 97
+            remainder = (remainder * 10 + (ord(c) - 48)) % 97
         return remainder == 1
     except Exception:
         return False
@@ -979,11 +998,28 @@ class BankChangeRequest(BaseModel):
 
     def clean(self):
         super().clean()
-        s = ''.join(ch for ch in (self.requested_iban or '') if ch.strip())
-        if len(s) < 4:
+        raw = (self.requested_iban or '')
+        # Sanitize for quick checks: keep alnum, uppercase, normalize unicode digits to ASCII
+        try:
+            import unicodedata as _ud
+            alnum = []
+            for ch in raw:
+                if ch.isalnum():
+                    if ch.isalpha():
+                        alnum.append(ch.upper())
+                    else:
+                        try:
+                            alnum.append(str(int(_ud.digit(ch))))
+                        except Exception:
+                            # invalid unicode digit
+                            pass
+            up = ''.join(alnum)
+        except Exception:
+            up = ''.join(ch for ch in raw.upper() if ch.isalnum())
+
+        if len(up) < 4:
             raise ValidationError({"requested_iban": "IBAN غير صالح"})
-        # SA specific quick check
-        up = s.upper().replace(' ', '')
+        # SA specific quick check (after normalization)
         if up.startswith('SA') and len(up) != 24:
             raise ValidationError({"requested_iban": "IBAN سعودي يجب أن يكون 24 خانة"})
         if not _iban_mod97_ok(up):

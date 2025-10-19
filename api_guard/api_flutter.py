@@ -263,8 +263,14 @@ class BankAccountChangeCreateView(APIView):
         emp = _user_employee(request)
         ser = self._Ser(data=request.data)
         ser.is_valid(raise_exception=True)
-        req = create_or_replace_pending_request(employee=emp, payload=ser.validated_data)
-        return Response({'id': req.id, 'status': req.status}, status=status.HTTP_201_CREATED)
+        try:
+            req = create_or_replace_pending_request(employee=emp, payload=ser.validated_data)
+            return Response({'id': req.id, 'status': req.status}, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            # أعد خطأ 400 ببدن واضح عند فشل التحقق
+            msg = getattr(e, 'message', None) or str(e)
+            data = getattr(e, 'message_dict', None) or {'detail': msg}
+            return Response(data, status=status.HTTP_400_BAD_REQUEST)
 
 
 class BankAccountApproveView(APIView):
@@ -274,8 +280,13 @@ class BankAccountApproveView(APIView):
         if not _is_hr(request.user):
             raise PermissionDenied('ليست لديك صلاحية')
         comment = (request.data.get('hr_comment') or '').strip() or None
-        req = approve_bank_change(request_id=pk, reviewer=request.user, comment=comment)
-        return Response({'status': req.status})
+        try:
+            req = approve_bank_change(request_id=pk, reviewer=request.user, comment=comment)
+            return Response({'status': req.status})
+        except Exception as e:
+            msg = getattr(e, 'message', None) or str(e)
+            data = getattr(e, 'message_dict', None) or {'detail': msg}
+            return Response(data, status=status.HTTP_400_BAD_REQUEST)
 
 
 class BankAccountRejectView(APIView):
@@ -285,8 +296,13 @@ class BankAccountRejectView(APIView):
         if not _is_hr(request.user):
             raise PermissionDenied('ليست لديك صلاحية')
         comment = (request.data.get('hr_comment') or '').strip() or None
-        req = reject_bank_change(request_id=pk, reviewer=request.user, comment=comment)
-        return Response({'status': req.status})
+        try:
+            req = reject_bank_change(request_id=pk, reviewer=request.user, comment=comment)
+            return Response({'status': req.status})
+        except Exception as e:
+            msg = getattr(e, 'message', None) or str(e)
+            data = getattr(e, 'message_dict', None) or {'detail': msg}
+            return Response(data, status=status.HTTP_400_BAD_REQUEST)
 
 
 class RewardsListView(APIView):
